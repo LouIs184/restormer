@@ -7,4 +7,10 @@
 *.mat
 *.npy
 .DS_Store
-
+.vscode/
+experiments/
+results/
+.eggs/
+*.egg-info/
+*_img.txt
+*_proj.txt
