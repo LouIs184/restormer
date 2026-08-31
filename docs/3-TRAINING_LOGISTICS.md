@@ -1,7 +1,7 @@
 # 训练后勤手册（产物位置 / 监控 / 断点 / TensorBoard）
 
 > 训练跑起来之后，"东西在哪、怎么盯、坏了怎么办"这类问题都在这。
-> 配套：执行流程见 [EXECUTION.md](EXECUTION.md)，配置参数见 [CONFIG_PARAMS.md](CONFIG_PARAMS.md)。
+> 配套：执行流程见 [2-EXECUTION.md](2-EXECUTION.md)，配置参数见 [4-CONFIG_PARAMS.md](4-CONFIG_PARAMS.md)。
 
 服务器上仓库位置：`/root/imageReconstruction/restormer`（当前 AutoDL 实例）。
 
@@ -122,7 +122,7 @@ nvidia-smi
 
 ## 5. 训练跑完/中途评估
 
-用最新权重推理验证集（文档 `docs/EXECUTION.md` 第 7 节）：
+用最新权重推理验证集（文档 `docs/2-EXECUTION.md` 第 7 节）：
 
 ```bash
 python test_ct.py --weights experiments/CT_ImageDomain_Restormer/models/net_g_latest.pth \

@@ -1,5 +1,6 @@
-# general settings
-name: CT_ImageDomain_Restormer
+# 投影域训练配置：domain: proj（方案 B，按视角取探测器平面，同 AICT-code）
+# 切回图像域：把两处 type/domain 段换成 image 域参数（见 docs/5-PROJECTION_DOMAIN.md §2.2）
+name: CT_ProjectionDomain_Restormer
 model_type: ImageCleanModel
 scale: 1
 num_gpu: 1            # 改成你的 GPU 数；0 表示纯 CPU（极慢，仅调试）
@@ -10,21 +11,22 @@ datasets:
   train:
     name: TrainSet
     type: Dataset_CT
-    domain: image
-    txt: ./train_img.txt
-    hu_min: -1000     # 与 AICTVer2 PhaseCT 一致（经 analyze_hu_range.py 确认）
-    hu_max: 1000
-    geometric_augs: true
+    domain: proj                  # ← 域开关：'image' | 'proj'
+    txt: ./train_proj_img.txt
+
+    proj_norm_clip_max: 0.28      # 投影域归一化（同 AICT proj_reader）：clip(x,0,0.28)/0.28
+    proj_crop_rows: 16            # 裁上下黑边：128 - 2×16 = 96 行
+    geometric_augs: false         # 投影域禁 90° 旋转（交换视角轴/通道轴，物理无意义）
 
     use_shuffle: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 4
+    batch_size_per_gpu: 4         # 须 = max(mini_batch_sizes)=4（渐进式阶段从这里子采样）
 
-    ### ------- 渐进式训练（小 patch 先训，再逐步放大）--------
-    mini_batch_sizes: [4, 3, 2, 1]       # 每 GPU 批大小
-    iters: [30000, 24000, 18000, 18000]  # 每个阶段的迭代数
-    gt_size: 256                         # 最大 patch 尺寸
-    gt_sizes: [128, 160, 192, 256]       # 对应各阶段 patch 尺寸
+    ### 渐进式训练：gt_sizes 上限必须 ≤ 裁剪后高度 96（Restormer 只需 8 整除）
+    mini_batch_sizes: [4, 3, 2, 1]
+    iters: [30000, 24000, 18000, 18000]
+    gt_size: 96
+    gt_sizes: [48, 64, 80, 96]
     ### -------------------------------------------------------
 
     dataset_enlarge_ratio: 1
@@ -33,17 +35,17 @@ datasets:
   val:
     name: ValSet
     type: Dataset_CT
-    domain: image
-    txt: ./valid_img.txt
-    hu_min: -1000
-    hu_max: 1000
+    domain: proj
+    txt: ./valid_proj_img.txt
+    proj_norm_clip_max: 0.28
+    proj_crop_rows: 16
     io_backend:
       type: disk
 
 # network structures
 network_g:
   type: Restormer
-  inp_channels: 1     # 灰度 CT 切片
+  inp_channels: 1     # 单通道视角平面；双能可设 2
   out_channels: 1     # 残差结构，必须与 inp_channels 相同
   dim: 48
   num_blocks: [4, 6, 6, 8]
@@ -74,7 +76,7 @@ train:
     eta_mins: [0.0003, 0.000001]
 
   mixing_augs:
-    mixup: true        # 数据量小，建议开 mixup 缓解过拟合
+    mixup: false       # 投影域样本多（7200），AICT 投影域配置未开 mixup；想开设 true
     mixup_beta: 1.2
     use_identity: true
 
@@ -84,7 +86,7 @@ train:
     weight_decay: !!float 1e-4
     betas: [0.9, 0.999]
 
-  # losses
+  # losses：post-log 噪声近似高斯，L1 是合理起点；想对齐 AICT 基线（MSE）就改 type: MSELoss
   pixel_opt:
     type: L1Loss
     loss_weight: 1

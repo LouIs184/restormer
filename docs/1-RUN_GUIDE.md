@@ -14,7 +14,7 @@
   1. 这个仓库本质是 **2D 图像恢复框架**（Restormer 是 2D Transformer），图像域直接产出最终要交付的 CT 图像；
   2. **Restormer 仓库里没有任何 CT 重建（FBP）代码** —— 投影域训练得到的是「校正后的 sinogram」，无法在这个仓库里直接变回图像来验证/交付（你 AICTVer2 里有 ProjCT 管线，但本项目没有重建环节）；
   3. 图像域的 PSNR/SSIM 直接反映临床影像质量，评估闭环。
-- **运行三步**：① 生成数据索引 `train_img.txt` / `valid_img.txt`（第 4 节，按你 `patients.yaml` 的划分）；② 新增一个自定义数据集文件 + 一个 yml 配置（第 5、6 节给了完整代码）；③ 一条命令开始训练。
+- **运行三步**：① 生成数据索引（第 4、9 节）；② 统一数据集 `Dataset_CT` + 两个 yml 已就位（`domain: image/proj` 一键切换，第 5、6、9 节）；③ 一条命令开始训练。
 - 环境：Python 3.8~3.10 + PyTorch 2.x + 常用 pip 包 + `python setup.py develop --no_cuda_ext`（第 2 节给完整命令）。
 
 ---
@@ -25,7 +25,7 @@
 
 - **Restormer**（CVPR 2022）是一个 **2D 图像到图像的恢复网络**，`forward` 最后一行是 `out = self.output(...) + inp_img`，即**残差学习**。
 - 输入输出通道数由配置控制：`inp_channels` / `out_channels`，灰度图用 `1`（两者必须相等，因为是残差结构）。
-- 这个仓库不是「一个针对你的数据写好的代码」，而是一个 **BasicSR 框架 + Restormer 模型** 的通用架子。仓库里已有的 Deraining / Denoising / Deblurring 只是四个「示例任务」，各自有 yml 配置 + dataset 类。**你的 CT 任务需要仿照它们，自己加一个 yml 配置和一个小 dataset 类**（第 5、6 节给了完整可直接用的代码）。
+- 这个仓库不是「一个针对你的数据写好的代码」，而是一个 **BasicSR 框架 + Restormer 模型** 的通用架子。仓库里已有的 Deraining / Denoising / Deblurring 只是四个「示例任务」，各自有 yml 配置 + dataset 类。**你的 CT 任务已按此加好**：一个统一数据集 `Dataset_CT`（第 5 节）+ 两个 yml（图像域/投影域，第 6、9 节），靠 yml 的 `domain` 字段切换，代码全部在仓库就位。
 
 ### 1.2 训练流程（BasicSR 约定）
 
@@ -107,7 +107,7 @@ python -c "from basicsr.models.archs.restormer_arch import Restormer; print('res
 | 物理合理性 | 后验（learned image-domain correction） | 更本质（束硬化是 sinogram 域现象，post-log 伪影可加） |
 | 与 Restormer 匹配度 | 高（本就是 2D 图像恢复模型） | 中（视角尺寸 128×512 非方形、各向异性，但可 patch 化） |
 | 与你的基线可比性 | 直接对标 `DenseUNet_PhaseCT` | 对标 `DenseUNet_ProjCT` |
-| 实现成本 | 低（本文档给现成代码） | 中（移植你 AICTVer2 的 `proj_reader` + `prepare_proj_data.py`，见第 9 节） |
+| 实现成本 | 低（现成代码） | 低（同一个 `Dataset_CT`，`domain: proj` 即切换，见第 9 节） |
 
 ### 3.1 为什么推荐图像域
 
@@ -122,7 +122,7 @@ python -c "from basicsr.models.archs.restormer_arch import Restormer; print('res
 - 想直接对标自己的 `DenseUNet_ProjCT` 基线，看 Transformer 在 sinogram 域能不能赢过 DenseUNet2d；
 - 数据量上投影域更大（7200 vs 1580），且 post-log 伪影可加、残差学习物理意义成立（`DATASET_FORMAT.md` 第 118 行也确认了）。
 
-如果你走投影域，第 9 节给了按你 AICTVer2 做法移植的适配。
+投影域已按你 AICTVer2 的做法适配好（同一个 `Dataset_CT`，`domain: proj`），见第 9 节。
 
 ---
 
@@ -151,7 +151,7 @@ python -c "from basicsr.models.archs.restormer_arch import Restormer; print('res
 
 切片号取 `1..158`（剔除首尾切片，160-2=158）。**⚠️ 你 AICTVer2 目录里现存的 `train_img.txt`/`valid_img.txt` 是旧划分、且写的是 Windows 路径，不能直接拿来用，必须在服务器上重新生成。**
 
-新建 `prepare_ct_data.py`（放 Restormer 仓库根目录，内容即你 AICTVer2 的 `prepare_data.py` 简化版，划分写死为 `patients.yaml`）：
+`prepare_ct_data.py` 已在仓库根目录就位（带 `--data-root` / `--output` 参数，划分写死为 `patients.yaml`），核心逻辑即下面代码：
 
 ```python
 ## 生成 train_img.txt / valid_img.txt（图像域，切片 1..158）
@@ -190,7 +190,7 @@ write_list("valid_img.txt", VALID)
 print("done: train", 158 * len(TRAIN), "valid", 158 * len(VALID))
 ```
 
-> 若你改 `patients.yaml`，改上面两个列表即可，两边保持一致。
+> 若你改 `patients.yaml`，改上面两个列表即可。仓库里的正式版带参数：`python prepare_ct_data.py --data-root /你的/数据目录 --output ./`。
 
 ### 4.4 归一化窗口（与 AICTVer2 对齐）
 
@@ -204,14 +204,18 @@ img_norm = clip((HU - hu_min) / (hu_max - hu_min), 0, 1)，其中 hu_min=-1000, 
 
 ---
 
-## 5. 代码：新增自定义数据集（读索引文件 + memmap，不丢精度）
+## 5. 代码：统一数据集 `Dataset_CT`（一个类同时支持图像域 / 投影域）
 
-新建文件 `basicsr/data/ct_image_dataset.py`（文件名必须以 `_dataset.py` 结尾，框架自动扫描注册，见 `basicsr/data/__init__.py`）：
+文件 `basicsr/data/ct_image_dataset.py`（文件名以 `_dataset.py` 结尾，框架自动扫描注册，见 `basicsr/data/__init__.py`）。**只这一个数据集类**，靠 yml 里 `datasets.*` 的 `domain` 字段分派：
+
+- `domain: image` → 读 `rec_*.raw` 切片 `(512,512)`，HU 归一化；
+- `domain: proj` → 读 `proj_*.raw` 视角 `(128,512)`，`clip(x,0,0.28)/0.28` 归一化、`proj_crop_rows` 裁黑边（同 AICTVer2 `proj_reader`）。
 
 ```python
-## 双能相位 CT 图像域去伪影数据集：按 train_img.txt/valid_img.txt 读取
-## 每行: <输入raw路径> <目标raw路径> <切片号1..158>
-## 归一化: (HU - (-1000)) / 2000 -> [0,1]（与 AICTVer2 raw_reader 一致）
+## 双能相位 CT 数据集：通过 yml 的 domain 一键切换 图像域/投影域
+## domain = 'image' -> 读 rec_*.raw 切片 (512,512)，HU 归一化
+## domain = 'proj'  -> 读 proj_*.raw 视角 (128,512)，clip 归一化（同 AICT proj_reader）
+## 索引文件每行: <输入raw> <目标raw> <索引>（image=切片号z，proj=视角号v）
 import locale
 import numpy as np
 from torch.utils import data as data
@@ -220,13 +224,12 @@ from basicsr.data.transforms import paired_random_crop, random_augmentation
 from basicsr.utils import img2tensor, padding
 
 
-class Dataset_CTImage(data.Dataset):
+class Dataset_CT(data.Dataset):
     def __init__(self, opt):
-        super(Dataset_CTImage, self).__init__()
+        super(Dataset_CT, self).__init__()
         self.opt = opt
-        self.phase = opt['phase']          # 'train' / 'val'，由框架自动注入
+        self.phase = opt['phase']          # 'train' / 'val'，框架自动注入
         self.scale = opt['scale']          # 固定为 1
-        # 索引文件路径含中文，做编码回退（同 AICTVer2 raw_reader）
         txt = opt['txt']
         try:
             with open(txt, encoding='utf-8') as f:
@@ -234,55 +237,77 @@ class Dataset_CTImage(data.Dataset):
         except UnicodeDecodeError:
             with open(txt, encoding=locale.getpreferredencoding()) as f:
                 self.paired = f.readlines()
+
+        # ---- 域开关（yml 里切换）----
+        self.domain = opt.get('domain', 'image')      # 'image' | 'proj'
+
+        # 图像域参数
         self.hu_min = float(opt.get('hu_min', -1000.0))
         self.hu_range = float(opt.get('hu_max', 1000.0)) - self.hu_min
+        # 投影域参数（同 AICT-code proj_reader）
+        self.proj_norm_clip_max = float(opt.get('proj_norm_clip_max', 0.28))
+        self.proj_crop_rows = int(opt.get('proj_crop_rows', 0))
+
         self.geometric_augs = opt.get('geometric_augs', True)
-        # np.memmap 惰性映射体积文件，不显式占 RAM（OS 页缓存负责）
         self._vol_cache = {}
 
     def _volume(self, path):
         if path not in self._vol_cache:
+            shape = (160, 512, 512) if self.domain == 'image' else (720, 128, 512)
             self._vol_cache[path] = np.memmap(
-                path, dtype=np.float32, mode='r', shape=(160, 512, 512))
+                path, dtype=np.float32, mode='r', shape=shape)
         return self._vol_cache[path]
 
     def _norm(self, x):
-        return np.clip((x - self.hu_min) / self.hu_range, 0, 1).astype(np.float32)
+        if self.domain == 'image':
+            # 图像域：HU 线性归一化 (x+1000)/2000
+            return np.clip((x - self.hu_min) / self.hu_range, 0, 1).astype(np.float32)
+        else:
+            # 投影域：AICT proj_reader 的 clip 归一化
+            return np.clip(x, 0, self.proj_norm_clip_max) / self.proj_norm_clip_max
 
     def __getitem__(self, index):
         line = self.paired[index].strip()
-        inp_path, gt_path, z = line.split()
-        z = int(z)
+        inp_path, gt_path, idx = line.split()
+        idx = int(idx)
 
         inp_vol = self._volume(inp_path)
         gt_vol = self._volume(gt_path)
 
-        img_lq = np.expand_dims(self._norm(inp_vol[z]), axis=2)  # (512,512,1)
-        img_gt = np.expand_dims(self._norm(gt_vol[z]), axis=2)
+        if self.domain == 'image':
+            img_lq, img_gt = inp_vol[idx], gt_vol[idx]        # (512,512) 切片
+        else:
+            img_lq, img_gt = inp_vol[idx], gt_vol[idx]        # (128,512) 视角
+            if self.proj_crop_rows > 0:                        # 裁上下黑边
+                img_lq = img_lq[self.proj_crop_rows:-self.proj_crop_rows, :]
+                img_gt = img_gt[self.proj_crop_rows:-self.proj_crop_rows, :]
+
+        img_lq = np.expand_dims(self._norm(img_lq), axis=2)   # (H,W,1)
+        img_gt = np.expand_dims(self._norm(img_gt), axis=2)
 
         if self.phase == 'train':
             gt_size = self.opt['gt_size']
             img_lq, img_gt = padding(img_lq, img_gt, gt_size)
             img_gt, img_lq = paired_random_crop(img_gt, img_lq, gt_size,
                                                 self.scale, None)
-            if self.geometric_augs:
+            if self.geometric_augs and self.domain == 'image':
+                # 投影域禁 90° 旋转（交换视角轴/通道轴，物理无意义）
                 img_gt, img_lq = random_augmentation(img_gt, img_lq)
 
-        # HWC -> CHW, numpy -> tensor（单通道，无需 BGR->RGB）
         img_gt, img_lq = img2tensor([img_gt, img_lq], bgr2rgb=False, float32=True)
-
-        return {
-            'lq': img_lq,
-            'gt': img_gt,
-            'lq_path': inp_path,
-            'gt_path': gt_path,
-        }
+        return {'lq': img_lq, 'gt': img_gt, 'lq_path': inp_path, 'gt_path': gt_path}
 
     def __len__(self):
         return len(self.paired)
+
+
+# 兼容别名：旧的 type: Dataset_CTImage 仍可用（等价 domain: image）
+Dataset_CTImage = Dataset_CT
 ```
 
-> 性能说明：AICTVer2 的 `raw_reader` 每次 `__getitem__` 都 `np.fromfile` 读整个 160MB 体积再取一张切片，慢；这里改用 `np.memmap`，只按需读被访问的页，首轮磁盘 IO 后由页缓存命中。
+> 旧版 `Dataset_CTImage` 已并入 `Dataset_CT`（`domain: image` 路径行为完全不变），末尾保留 `Dataset_CTImage = Dataset_CT` 别名，老 yml 不换也能跑。
+>
+> 性能说明：AICTVer2 的 `raw_reader` 每次 `__getitem__` 都 `np.fromfile` 读整个 160MB 体积再取一张切片，慢；这里**两个域都用 `np.memmap`** 惰性映射，只按需读被访问的页，首轮磁盘 IO 后由页缓存命中（投影域按视角随机访问单视角，语义等同 AICT `proj_reader` 的 seek 读取）。
 
 ---
 
@@ -302,7 +327,8 @@ manual_seed: 100
 datasets:
   train:
     name: TrainSet
-    type: Dataset_CTImage
+    type: Dataset_CT
+    domain: image
     txt: ./train_img.txt
     hu_min: -1000     # 与 AICTVer2 PhaseCT 一致
     hu_max: 1000
@@ -324,7 +350,8 @@ datasets:
 
   val:
     name: ValSet
-    type: Dataset_CTImage
+    type: Dataset_CT
+    domain: image
     txt: ./valid_img.txt
     hu_min: -1000
     hu_max: 1000
@@ -413,9 +440,10 @@ dist_params:
 
 **yml 里需要你改的东西（其余照抄）**：
 - `num_gpu`：你的 GPU 张数；
+- `domain`：`image`（图像域）/ `proj`（投影域，直接用现成的 `Options/CT_ProjectionDomain_Restormer.yml`，见第 9 节）；
 - `txt`：指向第 4.3 节生成的 `train_img.txt` / `valid_img.txt` 的**绝对路径**（或相对仓库根目录的路径）；
-- 想对齐 AICTVer2 的 MSE 损失：把 `pixel_opt.type` 改成 `L1Loss`→`L1Loss` 不用改，换 MSE 就把 `type` 改为 `L1Loss` 对应库里的 `MSELoss`（`basicsr/models/losses/losses.py` 里有）；
-- 显存紧张（<16GB）时把 `batch_size_per_gpu` 和 `mini_batch_sizes` 各减半，或把 `gt_size` 降到 192。
+- 想对齐 AICTVer2 的 MSE 损失：把 `pixel_opt.type` 的 `L1Loss` 改为 `MSELoss`（`basicsr/models/losses/losses.py` 里有）；
+- 显存紧张（<16GB）时把 `batch_size_per_gpu` 和 `mini_batch_sizes` 各减半，或把 `gt_size` 降到 192（投影域受 `≤96` 约束，见第 9.2 节）。
 
 ---
 
@@ -452,7 +480,7 @@ tensorboard --logdir tb_logger --port 6006
 
 ### 7.4 产物位置与断点续训
 
-- 权重：`experiments/CT_ImageDomain_Restormer/models/`（`net_g_latest.pth` + 每 1000 步一个快照）
+- 权重：`experiments/CT_ImageDomain_Restormer/models/`（`net_g_latest.pth` + 每 5000 步一个快照 `net_g_<iter>.pth`）
 - 断点：`experiments/CT_ImageDomain_Restormer/training_states/`
 - 续训：把 yml 里 `path.resume_state` 指向最近的 `.state` 文件再启动即可。
 
@@ -460,7 +488,7 @@ tensorboard --logdir tb_logger --port 6006
 
 ## 8. 推理与评估
 
-新建 `test_ct.py`（放仓库根目录）：读 `.raw` → 逐切片推理 → 同时输出**可视化 PNG**、**写回 HU 的 .raw**、**PSNR/SSIM**。
+`test_ct.py` 已在仓库根目录（读 `.raw` → 逐切片推理 → 同时输出**可视化 PNG**、**写回 HU 的 .raw**、**PSNR/SSIM**），完整代码：
 
 ```python
 ## 图像域推理：Restormer 权重 -> 校正后的 CT 切片
@@ -537,106 +565,56 @@ python test_ct.py --weights experiments/CT_ImageDomain_Restormer/models/net_g_la
 
 ---
 
-## 9. （可选）投影域方案（对齐你的 ProjCT 做法）
+## 9. （可选）投影域方案（对齐你的 ProjCT 做法，`domain: proj`）
 
-你 AICTVer2 的 ProjCT 是**按视角**处理的：每个视角是一个 `128×512` 的探测器平面（1 通道），归一化 `clip [0, 0.28] → [0,1]`，并 `crop_rows=16` 裁掉上下黑边。移植到 Restormer 的要点：
+你 AICTVer2 的 ProjCT 是**按视角**处理的：每个视角是一个 `128×512` 的探测器平面（1 通道），归一化 `clip [0, 0.28] → [0,1]`，并 `crop_rows=16` 裁掉上下黑边。Restormer 这边**不用另写数据集**——第 5 节的 `Dataset_CT` 里 `domain: proj` 就是这套逻辑。你要做的只是**换索引 + 换 yml**：
 
-### 9.1 数据索引（`prepare_ct_proj_data.py`）
+### 9.1 数据索引（`prepare_ct_proj_data.py`，已在仓库）
 
-每行 `<输入proj_raw> <目标proj_raw> <视角号0..719>`，视角取全 720 个（首尾视角如确认有运动伪影，可改成 `1..719`）：
+每行 `<输入proj_raw> <目标proj_raw> <视角号0..719>`，视角取全 720 个（首尾视角如确认有运动伪影，可把 `prepare_ct_proj_data.py` 里的循环改成 `range(1, 719)` 后重新生成）：
 
-```python
-## 生成 train_proj_img.txt / valid_proj_img.txt（投影域，视角 0..719）
-import os
-
-DATA_ROOT = "/root/autodl-tmp/联影双能相位数据2080"
-# TRAIN / VALID 与第 4.3 节完全一致
-TRAIN = [ ...同第 4.3 节... ]
-VALID = [ ...同第 4.3 节... ]
-INP = "proj_pbi_fs_dec_blur_phase_100000.raw"
-GT = "proj_no_pbi.raw"
-
-def write_list(fname, patients):
-    with open(fname, "w", encoding="utf-8") as f:
-        for p in patients:
-            for v in range(720):
-                f.write(f"{os.path.join(DATA_ROOT, p, INP)} "
-                        f"{os.path.join(DATA_ROOT, p, GT)} {v}\n")
-
-write_list("train_proj_img.txt", TRAIN)
-write_list("valid_proj_img.txt", VALID)
-print("done: train", 720 * len(TRAIN), "valid", 720 * len(VALID))
+```bash
+python prepare_ct_proj_data.py   # 生成 train_proj_img.txt / valid_proj_img.txt（7200 / 2160 行）
 ```
 
-### 9.2 数据集（`basicsr/data/ct_proj_dataset.py`）
+TRAIN / VALID 划分与图像域完全一致（见第 4.3 节）。
 
-直接移植你 AICTVer2 `proj_reader.py` 的高效读取（**按字节偏移只读单个视角**，不必 memmap 整个体积）：
+### 9.2 配置（`Options/CT_ProjectionDomain_Restormer.yml`，已在仓库）
 
-```python
-## 投影域数据集：每行 <输入raw> <目标raw> <视角号>，读取单个视角 (128,512)
-import locale
-import numpy as np
-from torch.utils import data as data
-from basicsr.data.transforms import paired_random_crop, random_augmentation
-from basicsr.utils import img2tensor, padding
+对照第 6 节图像域 yml，**只改 `datasets` 段**：
 
-class Dataset_CTProj(data.Dataset):
-    def __init__(self, opt):
-        super(Dataset_CTProj, self).__init__()
-        self.opt = opt
-        self.phase = opt['phase']
-        self.scale = opt['scale']
-        txt = opt['txt']
-        try:
-            with open(txt, encoding='utf-8') as f:
-                self.paired = f.readlines()
-        except UnicodeDecodeError:
-            with open(txt, encoding=locale.getpreferredencoding()) as f:
-                self.paired = f.readlines()
-        self.norm_clip_max = float(opt.get('norm_clip_max', 0.28))
-        self.crop_rows = int(opt.get('crop_rows', 16))
+| 项 | 图像域 | 投影域 |
+|----|--------|--------|
+| `type` | `Dataset_CT` | `Dataset_CT`（同一个类） |
+| `domain` | `image` | **`proj`** |
+| `txt` | `./train_img.txt` / `./valid_img.txt` | `./train_proj_img.txt` / `./valid_proj_img.txt` |
+| 归一化 | `hu_min/hu_max: -1000/1000` | `proj_norm_clip_max: 0.28` |
+| 黑边裁剪 | — | `proj_crop_rows: 16`（→ 96 行） |
+| `geometric_augs` | `true` | **`false`**（禁 90° 旋转） |
+| `gt_size / gt_sizes` | `256 / [128,160,192,256]` | **`96 / [48,64,80,96]`** |
+| `mixing_augs.mixup` | `true` | `false` |
 
-    def _read_view(self, path, v):
-        view_size = 128 * 512
-        off = v * view_size * 4
-        return np.fromfile(path, dtype=np.float32,
-                           count=view_size, offset=off).reshape(128, 512)
+完整配置即仓库里的 `Options/CT_ProjectionDomain_Restormer.yml`（网络 `inp_channels: 1` 不变）。
 
-    def __getitem__(self, index):
-        line = self.paired[index].strip()
-        inp_path, gt_path, v = line.split()
-        v = int(v)
-        img_lq = self._read_view(inp_path, v)
-        img_gt = self._read_view(gt_path, v)
-        if self.crop_rows > 0:                      # 裁上下黑边
-            img_lq = img_lq[self.crop_rows:-self.crop_rows, :]
-            img_gt = img_gt[self.crop_rows:-self.crop_rows, :]
-        img_lq = np.clip(img_lq, 0, self.norm_clip_max).astype(np.float32) / self.norm_clip_max
-        img_gt = np.clip(img_gt, 0, self.norm_clip_max).astype(np.float32) / self.norm_clip_max
-        img_lq = np.expand_dims(img_lq, axis=2)     # (H,512,1)
-        img_gt = np.expand_dims(img_gt, axis=2)
-        if self.phase == 'train':
-            gt_size = self.opt['gt_size']
-            img_lq, img_gt = padding(img_lq, img_gt, gt_size)
-            img_gt, img_lq = paired_random_crop(img_gt, img_lq, gt_size,
-                                                self.scale, None)
-            if self.geometric_augs:
-                img_gt, img_lq = random_augmentation(img_gt, img_lq)
-        img_gt, img_lq = img2tensor([img_gt, img_lq], bgr2rgb=False, float32=True)
-        return {'lq': img_lq, 'gt': img_gt,
-                'lq_path': inp_path, 'gt_path': gt_path}
+> ⚠️ **`gt_sizes` 最大值必须 ≤ 96**（`crop_rows=16` 后高度）。框架 `padding()` 会把样本补到 `gt_size`，若沿用 256 会训练在大部分人造反射边上。48/64/80/96 都是 8 的倍数，Restormer 3 次下采样无奇偶问题。
 
-    def __len__(self):
-        return len(self.paired)
+### 9.3 训练 / 推理
+
+```bash
+# 训练
+python basicsr/train.py -opt Options/CT_ProjectionDomain_Restormer.yml --launcher none
+
+# 推理（test_ct_proj.py 已在仓库）
+python test_ct_proj.py \
+    --weights experiments/CT_ProjectionDomain_Restormer/models/net_g_latest.pth \
+    --patient 72278_406010_960+_AXIAL_CE1_F071Y_20211216_Thick1_Incre1 \
+              91963_301643_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1 \
+              91963_53624_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1
 ```
-
-### 9.3 配置
-
-复制第 6 节的 yml，改三处即可：`name: CT_ProjDomain_Restormer`、两个 `txt` 指向 `train_proj_img.txt`/`valid_proj_img.txt`、`datasets.train.type: Dataset_CTProj`（val 同理），并在 train/val 各加 `norm_clip_max: 0.28`、`crop_rows: 16`。网络结构 `inp_channels: 1` 不变。
 
 ### 9.4 评估/交付提醒
 
-- 投影域输出是「校正后的视角」，**要看效果必须重建**。Restormer 仓库内没有 FBP；你 AICTVer2 里若有重建/评估环节，把校正后的 720 个视角写回 `(720,128,512)` 体积后接你的重建流程。
+- 投影域输出是「校正后的视角」，**要看效果必须重建**。`test_ct_proj.py` 用 skimage `iradon`（**平行束近似**，数据是扇/锥束）做定性 FBP 验证，并保存 `*_proj_corrected.raw` 供你的重建流程使用；精确几何请用你 AICTVer2 的重建代码。
 - 也可顺带用你的 `DenseUNet_ProjCT` 基线在**同一批视角**上做对比。
 
 ---
@@ -645,15 +623,16 @@ class Dataset_CTProj(data.Dataset):
 
 1. **首尾切片无信号**：图像域索引文件取 `z=1..158`（第 4.3 节已处理）；投影域首尾视角（0/719）可能有运动伪影，如确认可改成 `1..719`。
 2. **别用 8-bit PNG 存切片当训练数据**：会把 HU 精度量化到 ~4HU/级。要么直接读 .raw（推荐，第 5 节 memmap 方案），要么存 16-bit/float `.npy`。
-3. **数据量小（13 病人）容易过拟合**：建议 `mixup: true`、开几何增强、监控 val PSNR 是否随训练掉头；可加 5 折交叉验证（每次留不同病人做 val）看稳定性。
+3. **数据量小（13 病人）容易过拟合**：图像域建议 `mixup: true`、开几何增强（`geometric_augs: true`）；**投影域保持 `geometric_augs: false`**（90° 旋转物理无意义）、可尝试开 `mixup`。监控 val PSNR 是否随训练掉头；可加 5 折交叉验证（每次留不同病人做 val）看稳定性。
 4. **划分已考虑域差异**：你的 `patients.yaml` 把唯一的平扫病人 18537 放进了训练集，验证集全为增强（CE1），训练/验证域分布接近，这点比 `DATASET_FORMAT.md` 的原始建议更稳。
 5. **PSNR 口径**：默认 `use_image: false` 在归一化张量上算，与 AICTVer2 `compute_psnr(max_val=1.0)` 一致；不要和 HU 域的论文 PSNR 直接比。
 6. **旧索引文件作废**：AICTVer2 目录里的 `train_img.txt`/`valid_img.txt` 是旧划分 + Windows 路径，务必在服务器上用第 4.3 节脚本重新生成（生成后用 `head` 确认路径是 `/root/autodl-tmp/联影双能相位数据2080/...`）。
 7. **PyTorch 2.6+**：`torch.load` 默认 `weights_only=True`，若断点续训/加载报 `weights_only` 相关错误，装 `torch<2.6`，或在 `basicsr/models/base_model.py` 的 `torch.load` 加 `weights_only=False`。
 8. **多卡**：`dist_params.backend: nccl`，确保 `--nproc_per_node` 与本机 GPU 数一致；日志里 `LOCAL_RANK` 相关的验证只在 rank 0 执行，属正常。
-9. **内存**：图像域数据集用 `np.memmap`（不显式占 RAM，比 AICTVer2 的整卷 `fromfile` 快且省）；投影域用单视角 seek 读取（同 `proj_reader.py`）。
+9. **内存**：图像域和投影域数据集统一用 `np.memmap` 惰性映射（不显式占 RAM，比 AICTVer2 的整卷 `fromfile` 快且省）；投影域按视角随机访问单视角，语义等同 AICT `proj_reader` 的 seek 读取。
 10. **progressive training**：`iters` 各阶段之和必须等于 `train.total_iter`，`mini_batch_sizes` 与 `gt_sizes` 长度一致；改 batch 时两者同步改。
 11. **对比基线时统一测试集**：跟 `DenseUNet_PhaseCT` 对比时，用同一验证集（72278、91963×2）同一归一化窗口跑完 AICTVer2 的 `test.py` 再比 PSNR。
+12. **投影域 patch 上限与参数名**：`gt_sizes` 最大值必须 ≤ `128 - 2*proj_crop_rows`（默认 96）；投影域归一化/裁剪参数名是 `proj_norm_clip_max` / `proj_crop_rows`（不是 `norm_clip_max` / `crop_rows`）。
 
 ---
 
@@ -662,8 +641,10 @@ class Dataset_CTProj(data.Dataset):
 | 操作 | 路径 | 内容 |
 |------|------|------|
 | 新增 | `prepare_ct_data.py` | 第 4.3 节，生成 `train_img.txt` / `valid_img.txt` |
-| 新增 | `basicsr/data/ct_image_dataset.py` | 第 5 节代码 |
-| 新增 | `Options/CT_ImageDomain_Restormer.yml` | 第 6 节代码 |
-| 新增（可选） | `prepare_ct_proj_data.py`、`basicsr/data/ct_proj_dataset.py` | 第 9 节投影域 |
-| 新增（可选） | `test_ct.py` | 第 8 节代码 |
+| 新增 | `prepare_ct_proj_data.py` | 第 9.1 节，生成 `train_proj_img.txt` / `valid_proj_img.txt` |
+| 新增 | `basicsr/data/ct_image_dataset.py` | 第 5 节，统一 `Dataset_CT`（`domain` 切换图像域/投影域） |
+| 新增 | `Options/CT_ImageDomain_Restormer.yml` | 第 6 节，`domain: image` |
+| 新增 | `Options/CT_ProjectionDomain_Restormer.yml` | 第 9.2 节，`domain: proj` |
+| 新增 | `test_ct.py` | 第 8 节，图像域推理 |
+| 新增 | `test_ct_proj.py` | 第 9.3 节，投影域推理 + FBP 验证 |
 | 环境 | conda + pip | 第 2 节命令 |
