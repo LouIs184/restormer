@@ -304,48 +304,19 @@ network_g:
 
 > **切回图像域** = 把 `domain: proj` → `domain: image`、`txt` 换 `train_img.txt`、去掉 `proj_*` 参数、恢复 `hu_min/hu_max`、`gt_size`/`gt_sizes` 换回 `256/[128,160,192,256]`、`geometric_augs: true`。其余不动。
 
-### 3.4 推理脚本：`test_ct_proj.py`（投影域 + FBP 图像域验证）
+### 3.4 推理脚本：`test_ct_proj.py`（在仓库，产出 .raw + 指标）
 
-对照 `test_ct.py`：读 proj 文件、逐视角推理、拼回 sinogram，**加一步 FBP 重建验收**。
+见仓库根目录 `test_ct_proj.py`：读 proj 文件、逐视角推理、裁黑边，产出 **`<病人>_pred/input/gt.raw`** 三种 `.raw`（input/gt 已按 `proj_crop_rows` 裁剪、与 pred 同形状）+ 终端 **MSE/RMSE/MAE/PSNR/SSIM**（原始值域，同 AICT-code infer.py）。
 
-```python
-## 投影域推理：Restormer 权重 -> 去伪影 sinogram -> FBP -> 与 rec_no_pbi 比
-import argparse, os
-import numpy as np, torch, yaml
-from skimage.metrics import peak_signal_noise_ratio, structural_similarity
-from skimage.transform import iradon
-from basicsr.models.archs.restormer_arch import Restormer
+- `proj_crop_rows` / `proj_norm_clip_max` **默认从训练 yml 读取**，保证与训练一致（可用 `--crop_rows` / `--proj_clip_max` 覆盖）。
+- 脚本**不含重建**。要图像域结果，把 `<病人>_pred.raw` 接你的重建流程（正确几何见 §4.4）。
+- `--data_root` 默认是服务器路径 `/root/autodl-tmp/联影双能相位数据2080`；本地（WSL/Windows）推理必须显式传 `--data_root` 指向本地数据目录。
 
-# ... 参数解析同 test_ct.py，只是 INP/GT 换成 proj 文件、归一化换 clip_max
-args = ...  # --proj_clip_max 0.28, --crop_rows 16
-
-net_cfg = dict(yaml.safe_load(open(args.config, encoding='utf-8'))['network_g'])
-net_cfg.pop('type'); model = Restormer(**net_cfg)
-model.load_state_dict(torch.load(args.weights, map_location='cpu')['params'])
-model = model.cuda().eval()
-
-def norm(x):  return np.clip(x, 0, args.proj_clip_max) / args.proj_clip_max
-def denorm(x): return x * args.proj_clip_max
-
-for patient in args.patient:
-    inp = np.fromfile(osp.join(args.data_root, patient, INP),
-                      dtype=np.float32).reshape(720, 128, 512)
-    gt  = np.fromfile(osp.join(args.data_root, patient, GT),
-                      dtype=np.float32).reshape(720, 128, 512)
-    H = 128 - 2 * args.crop_rows
-    pred = np.zeros((720, H, 512), dtype=np.float32)
-    with torch.no_grad():
-        for v in range(720):                       # 逐视角推理
-            x = norm(inp[v, args.crop_rows:-args.crop_rows, :])
-            x = torch.from_numpy(x).unsqueeze(0).unsqueeze(0).cuda()
-            pred[v] = denorm(model(x)[0, 0].cpu().numpy())
-
-    # FBP 平行束近似重建（正确几何见 §4.4）
-    theta = np.linspace(0, 180, 360, endpoint=False)
-    recon = iradon(pred[:, H//2, :], theta=theta)   # 取中间行所在层面
-    gt_slice = ...                                    # 对应 rec_no_pbi 层面
-    psnr = peak_signal_noise_ratio(recon, gt_slice, data_range=...)
-    print(f'{patient}: PSNR={psnr:.3f} dB')
+```bash
+python test_ct_proj.py \
+    --weights experiments/CT_ProjectionDomain_Restormer/models/net_g_latest.pth \
+    --data_root /root/autodl-tmp/联影双能相位数据2080 \
+    --patient 72278_406010_960+_AXIAL_CE1_F071Y_20211216_Thick1_Incre1
 ```
 
 ---
@@ -375,10 +346,10 @@ for patient in args.patient:
 - 翻转（翻转通道方向/视角顺序）可选，但 AICT 投影域配置**没开任何几何增强**，先照抄。
 - mixup：框架的 `Mixing_Augment` 是 batch 级混合，混合两个视角的 sinogram，物理无害，可选（AICT 的 proj 配置没开）。
 
-### 4.4 FBP 验证的几何参数
+### 4.4 重建环节（脚本外）的几何参数
 
-- sinogram 域 PSNR 只用于训练监控；**最终验收必须 FBP 到图像域**与 `rec_no_pbi.raw` 比 PSNR/SSIM。
-- 数据是扇/锥束，skimage 的 `iradon` 只是平行束近似，仅限快速定性。精确几何（源距、探测器间距、扇角）从 **AICT-code 的重建代码** 获取，或用 `astra-toolbox` / `pytorch-fbp`。
+- sinogram 域 PSNR 只用于训练监控；**最终验收必须把 `<病人>_pred.raw` 重建到图像域**与 `rec_no_pbi.raw` 比 PSNR/SSIM。`test_ct_proj.py` 只产出 sinogram，**不含重建**。
+- 数据是扇/锥束，若用 skimage `iradon` 只做平行束近似、仅限快速定性。精确几何（源距、探测器间距、扇角）从 **AICT-code 的重建代码** 获取，或用 `astra-toolbox` / `pytorch-fbp`。
 
 ### 4.5 通道数与损失
 
@@ -393,11 +364,11 @@ AICT 确认 **不需要剔除**，用全部 720 视角（`range(0, 720)`）。DA
 
 ## 五、改动清单
 
-- [ ] `basicsr/data/ct_image_dataset.py`：`Dataset_CTImage` → 升级为 `Dataset_CT`（加 `domain` 分派，见 §3.1）
-- [ ] 把现有 `Options/CT_ImageDomain_Restormer.yml` 的 `type` 改为 `Dataset_CT`、`domain: image`（验证图像域回归）
-- [ ] 新建 `prepare_ct_proj_data.py`，运行生成 `train_proj_img.txt / valid_proj_img.txt`
-- [ ] 新建 `Options/CT_ProjectionDomain_Restormer.yml`（见 §3.3）
-- [ ] 新建 `test_ct_proj.py`（投影域推理 + FBP 图像域验证，见 §3.4）
+- [x] `basicsr/data/ct_image_dataset.py`：`Dataset_CTImage` → 升级为 `Dataset_CT`（加 `domain` 分派，见 §3.1）
+- [x] 把现有 `Options/CT_ImageDomain_Restormer.yml` 的 `type` 改为 `Dataset_CT`、`domain: image`（验证图像域回归）
+- [x] 新建 `prepare_ct_proj_data.py`（在服务器跑它生成 `train_proj_img.txt / valid_proj_img.txt`）
+- [x] 新建 `Options/CT_ProjectionDomain_Restormer.yml`（见 §3.3）
+- [x] 新建 `test_ct_proj.py`（投影域推理，产出 `<病人>_pred/input/gt.raw` + 指标，见 §3.4）
 - [ ] 用 `analyze_proj_range.py`（可移植自 AICT-code）复核 `proj_norm_clip_max` 与黑边行数
 - [ ] 从 AICT-code 获取 FBP 几何参数，做最终图像域验收
 

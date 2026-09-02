@@ -150,7 +150,7 @@
 | ├ `crop_border: 0` | 计算前不裁边 |
 | └ `test_y_channel: false` | 不转 YCbCr Y 通道（CT 不需要） |
 
-> 投影域注意：训练日志里的 val PSNR 是 **sinogram 域** 的，只用于监控收敛；**最终验收需 FBP 重建到图像域**与 `rec_no_pbi.raw` 比（`test_ct_proj.py` 已带平行束近似验证，精确几何用 AICT-code 重建代码）。
+> 投影域注意：训练日志里的 val PSNR 是 **sinogram 域** 的，只用于监控收敛；**最终验收需把 `<病人>_pred.raw` FBP 重建到图像域**与 `rec_no_pbi.raw` 比（`test_ct_proj.py` 本身不含重建，精确几何用 AICT-code 重建代码）。
 
 ---
 

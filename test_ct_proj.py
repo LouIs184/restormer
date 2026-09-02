@@ -1,38 +1,46 @@
-## 投影域推理：Restormer 权重 -> 逐视角去伪影 -> 保存 sinogram + FBP 图像域验证
+## 投影域推理：Restormer 权重 -> 逐视角去伪影 -> 保存 {病人}_pred/input/gt.raw + 指标
+## 产出只有 .raw 和终端指标（同 AICT-code infer_proj 的做法，不存图）。
+## 输入/目标的探测器行裁剪与训练 yml 的 proj_crop_rows 一致，pred/input/gt 三卷同形状。
 ## 用法:
 ##   python test_ct_proj.py \
-##       --weights ./experiments/CT_ProjectionDomain_Restormer/models/net_g_latest.pth \
-##       --patient 11034_307811_960+_AXIAL_CE1_M067Y_20211215_Thick1_Incre1
+##       --weights experiments/CT_ProjectionDomain_Restormer/models/net_g_latest.pth \
+##       --data_root /root/autodl-tmp/联影双能相位数据2080 \
+##       --patient 72278_406010_960+_AXIAL_CE1_F071Y_20211216_Thick1_Incre1
 import argparse
 import os
-import cv2
 import numpy as np
 import torch
 import yaml
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
-from skimage.transform import iradon
 from basicsr.models.archs.restormer_arch import Restormer
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--weights', required=True, help='训练得到的 net_g_latest.pth')
-parser.add_argument('--data_root', default='/root/autodl-tmp/联影双能相位数据2080')
+parser.add_argument('--data_root', default='/root/autodl-tmp/联影双能相位数据2080',
+                    help='数据根目录（含 13 个病人文件夹）；本地推理务必改成本地路径')
 parser.add_argument('--patient', nargs='+', required=True, help='要推理的病人文件夹')
-parser.add_argument('--result_dir', default='./results/ct_proj')
-parser.add_argument('--config', default='Options/CT_ProjectionDomain_Restormer.yml')
-parser.add_argument('--proj_clip_max', type=float, default=0.28)
-parser.add_argument('--crop_rows', type=int, default=16)
-parser.add_argument('--view_save', type=int, default=360, help='存哪张视角的 PNG')
-parser.add_argument('--fbp_row', type=int, default=64,
-                    help='FBP 用的探测器行（原始行坐标，默认中间行）')
-parser.add_argument('--fbp_views', type=int, default=360,
-                    help='FBP 用多少视角（720 视角取前 360 覆盖 180°，平行束近似）')
+parser.add_argument('--result_dir', default='./results/ct_proj',
+                    help='输出目录（写 <病人>_pred/input/gt.raw）')
+parser.add_argument('--config', default='Options/CT_ProjectionDomain_Restormer.yml',
+                    help='训练 yml（取网络结构 + proj_crop_rows / proj_norm_clip_max）')
+parser.add_argument('--crop_rows', type=int, default=None,
+                    help='覆盖 yml 里的 proj_crop_rows（默认读 yml，保持与训练一致）')
+parser.add_argument('--proj_clip_max', type=float, default=None,
+                    help='覆盖 yml 里的 proj_norm_clip_max（默认读 yml，保持与训练一致）')
 args = parser.parse_args()
 os.makedirs(args.result_dir, exist_ok=True)
 
-# 从训练配置取网络结构
+# ---- 网络结构 + 投影域参数从训练 yml 读取 ----
 cfg = yaml.safe_load(open(args.config, 'r', encoding='utf-8'))
 net_cfg = dict(cfg['network_g'])
 net_cfg.pop('type')
+data_cfg = cfg['datasets'].get('val', cfg['datasets'].get('train', {}))
+crop_rows = args.crop_rows if args.crop_rows is not None else int(
+    data_cfg.get('proj_crop_rows', 16))
+clip_max = args.proj_clip_max if args.proj_clip_max is not None else float(
+    data_cfg.get('proj_norm_clip_max', 0.28))
+H = 128 - 2 * crop_rows
+
 model = Restormer(**net_cfg)
 try:  # PyTorch 2.6+ 默认 weights_only=True，会拒收含非张量的 ckpt
     ckpt = torch.load(args.weights, map_location='cpu', weights_only=False)
@@ -42,20 +50,33 @@ model.load_state_dict(ckpt['params'])
 model = model.cuda().eval()
 print('loaded', args.weights)
 
-INP = 'proj_pbi_fs_dec_blur_phase_100000.raw'
-GT = 'proj_no_pbi.raw'
+INP = 'proj_pbi_fs_dec_blur_phase_100000.raw'   # 输入（含伪影）
+GT = 'proj_no_pbi.raw'                          # 目标（干净）
 
 
 def norm(x):
-    return np.clip(x, 0, args.proj_clip_max) / args.proj_clip_max
+    return np.clip(x, 0, clip_max) / clip_max
 
 
 def denorm(x):
-    return x * args.proj_clip_max
+    return x * clip_max
 
 
-def rescale(a):
-    return (a - a.min()) / (a.max() - a.min() + 1e-8)
+def compute_metrics(pred, gt, tag=''):
+    """同 AICT-code infer.py：在原始值域上算 MSE/RMSE/MAE/PSNR/SSIM。"""
+    mse = np.mean((pred - gt) ** 2)
+    rmse = np.sqrt(mse)
+    mae = np.mean(np.abs(pred - gt))
+    dr = max(gt.max() - gt.min(), 1e-8)
+    psnr = peak_signal_noise_ratio(gt, pred, data_range=dr)
+    ssim = np.mean([
+        structural_similarity(gt[i], pred[i],
+                              data_range=max(gt[i].max() - gt[i].min(), 1e-8))
+        for i in range(gt.shape[0])
+    ])
+    print(f'  {tag}  MSE: {mse:.6f}  RMSE: {rmse:.6f}  MAE: {mae:.6f}  '
+          f'PSNR: {psnr:.2f}  SSIM: {ssim:.4f}')
+    return {'mse': mse, 'rmse': rmse, 'mae': mae, 'psnr': psnr, 'ssim': ssim}
 
 
 for patient in args.patient:
@@ -63,61 +84,27 @@ for patient in args.patient:
                       dtype=np.float32).reshape(720, 128, 512)
     gt = np.fromfile(os.path.join(args.data_root, patient, GT),
                      dtype=np.float32).reshape(720, 128, 512)
-    H = 128 - 2 * args.crop_rows
-    pred = np.zeros((720, H, 512), dtype=np.float32)
 
-    psnr_in, psnr_out, ssim_out = [], [], []
-    with torch.no_grad():
-        for v in range(720):            # 逐视角推理
-            x = norm(inp[v, args.crop_rows:-args.crop_rows, :])
-            x = torch.from_numpy(x).unsqueeze(0).unsqueeze(0).cuda()
-            out = model(x)[0, 0].cpu().numpy()          # (H,512) 归一化域
-            pred[v] = denorm(out)                        # 转回投影域物理值
-            g = norm(gt[v, args.crop_rows:-args.crop_rows, :])
-            psnr_in.append(peak_signal_noise_ratio(
-                norm(inp[v, args.crop_rows:-args.crop_rows, :]), g, data_range=1.0))
-            psnr_out.append(peak_signal_noise_ratio(out, g, data_range=1.0))
-            ssim_out.append(structural_similarity(out, g, data_range=1.0))
-
-    # 保存校正后的 sinogram 体积（供你的重建/对比流程使用）
-    pred.astype(np.float32).tofile(
-        os.path.join(args.result_dir, f'{patient}_proj_corrected.raw'))
-    np.save(os.path.join(args.result_dir, f'{patient}_proj_out.npy'), pred)
-
-    # 单视角可视化（input / output / gt）
-    v = args.view_save
-
-    def to_png(h, path):
-        cv2.imwrite(path, (norm(h) * 255).astype(np.uint8))
-
-    to_png(inp[v, args.crop_rows:-args.crop_rows, :],
-           os.path.join(args.result_dir, f'{patient}_v{v}_input.png'))
-    to_png(pred[v], os.path.join(args.result_dir, f'{patient}_v{v}_output.png'))
-    to_png(gt[v, args.crop_rows:-args.crop_rows, :],
-           os.path.join(args.result_dir, f'{patient}_v{v}_gt.png'))
-
-    print(f'{patient}: sinogram PSNR in={np.mean(psnr_in):.3f} dB -> '
-          f'out={np.mean(psnr_out):.3f} dB, SSIM out={np.mean(ssim_out):.4f}')
-
-    # FBP 图像域验证（平行束近似，定性）。同一 FBP 管线下比较
-    # recon(pred) vs recon(gt)，避免 HU↔投影单位换算偏差。
-    rc = args.fbp_row - args.crop_rows     # 转成裁剪后行坐标
-    if 0 <= rc < H:
-        theta = np.linspace(0, 180, args.fbp_views, endpoint=False)
-        sino_pred = pred[:args.fbp_views, rc, :].T     # (512, 360)，每列一个视角
-        sino_gt = gt[:args.fbp_views, rc, :].T
-        recon = iradon(sino_pred, theta=theta)
-        recon_gt = iradon(sino_gt, theta=theta)
-
-        cv2.imwrite(os.path.join(args.result_dir, f'{patient}_fbp_row{args.fbp_row}.png'),
-                    (rescale(recon) * 255).astype(np.uint8))
-        cv2.imwrite(os.path.join(args.result_dir, f'{patient}_fbp_row{args.fbp_row}_gt.png'),
-                    (rescale(recon_gt) * 255).astype(np.uint8))
-
-        psnr_img = peak_signal_noise_ratio(rescale(recon), rescale(recon_gt),
-                                           data_range=1.0)
-        print(f'  FBP(平行束近似) 行{args.fbp_row}: 重建域 PSNR='
-              f'{psnr_img:.3f} dB（对比 recon(pred) vs recon(gt)，见 *_fbp_row*.png）')
-        print('  提示: 数据是扇/锥束，skimage iradon 仅定性；精确几何请用 AICT-code 的重建代码')
+    # 裁剪上下黑边（与训练 proj_crop_rows 一致），保证 pred/input/gt 同形状 (720, H, 512)
+    if crop_rows > 0:
+        input_cropped = inp[:, crop_rows:-crop_rows, :]
+        gt_cropped = gt[:, crop_rows:-crop_rows, :]
     else:
-        print(f'  --fbp_row {args.fbp_row} 超出有效行范围，跳过 FBP')
+        input_cropped = inp
+        gt_cropped = gt
+
+    pred = np.zeros((720, H, 512), dtype=np.float32)
+    with torch.no_grad():
+        for v in range(720):                # 逐视角推理
+            x = torch.from_numpy(norm(input_cropped[v])).unsqueeze(0).unsqueeze(0).cuda()
+            pred[v] = denorm(model(x)[0, 0].cpu().numpy())
+
+    base = os.path.join(args.result_dir, patient)
+    pred.astype(np.float32).tofile(base + '_pred.raw')
+    input_cropped.astype(np.float32).tofile(base + '_input.raw')
+    gt_cropped.astype(np.float32).tofile(base + '_gt.raw')
+    print(f'Saved {patient}_pred/input/gt.raw  shape={pred.shape}')
+
+    print(f'  -- Metrics for {patient} --')
+    compute_metrics(input_cropped, gt_cropped, tag='input vs gt :')
+    compute_metrics(pred, gt_cropped, tag='pred  vs gt :')

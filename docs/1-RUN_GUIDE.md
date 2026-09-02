@@ -488,80 +488,32 @@ tensorboard --logdir tb_logger --port 6006
 
 ## 8. 推理与评估
 
-`test_ct.py` 已在仓库根目录（读 `.raw` → 逐切片推理 → 同时输出**可视化 PNG**、**写回 HU 的 .raw**、**PSNR/SSIM**），完整代码：
+`test_ct.py` 已在仓库根目录：逐切片推理 → 产出 **`<病人>_pred/input/gt.raw`** 三种 `.raw`（input/gt 已剔首尾切片、与 pred 同形状 `(158,512,512)`）+ 终端 **MSE/RMSE/MAE/PSNR/SSIM**（HU 值域，同 AICT-code infer.py）。逻辑同 §9.3 的 `test_ct_proj.py`，只是读 `rec_*.raw` 切片、归一化用 `hu_min/hu_max`（默认从训练 yml 读取）。
 
-```python
-## 图像域推理：Restormer 权重 -> 校正后的 CT 切片
-import argparse
-import os
-import cv2
-import numpy as np
-import torch
-import yaml
-from skimage.metrics import peak_signal_noise_ratio, structural_similarity
-from basicsr.models.archs.restormer_arch import Restormer
+**`test_ct.py` 参数**：
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--weights', required=True, help='训练得到的 net_g_latest.pth')
-parser.add_argument('--data_root', default='/root/autodl-tmp/联影双能相位数据2080')
-parser.add_argument('--patient', nargs='+', required=True, help='要推理的病人文件夹')
-parser.add_argument('--result_dir', default='./results/ct')
-parser.add_argument('--hu_min', type=float, default=-1000.0)
-parser.add_argument('--hu_max', type=float, default=1000.0)
-parser.add_argument('--config', default='Options/CT_ImageDomain_Restormer.yml')
-args = parser.parse_args()
-os.makedirs(args.result_dir, exist_ok=True)
-
-# 从训练配置取网络结构
-cfg = yaml.safe_load(open(args.config, 'r'))
-net_cfg = dict(cfg['network_g']); net_cfg.pop('type')
-model = Restormer(**net_cfg)
-ckpt = torch.load(args.weights, map_location='cpu')
-model.load_state_dict(ckpt['params'])
-model = model.cuda().eval()
-print('loaded', args.weights)
-
-INP = 'rec_pbi_fs_dec_blur_phase_100000.raw'
-GT = 'rec_no_pbi.raw'
-R = args.hu_max - args.hu_min
-
-def norm(x): return np.clip((x - args.hu_min) / R, 0, 1)
-def denorm(x): return x * R + args.hu_min
-
-def to_png(h, path):
-    cv2.imwrite(path, (norm(h) * 255).astype(np.uint8))
-
-for patient in args.patient:
-    inp = np.fromfile(os.path.join(args.data_root, patient, INP),
-                      dtype=np.float32).reshape(160, 512, 512)
-    gt = np.fromfile(os.path.join(args.data_root, patient, GT),
-                     dtype=np.float32).reshape(160, 512, 512)
-    out = np.zeros_like(inp)
-    psnr_list, ssim_list = [], []
-    with torch.no_grad():
-        for z in range(1, 159):            # 跳过首尾
-            x = torch.from_numpy(norm(inp[z])).unsqueeze(0).unsqueeze(0).cuda()
-            out[z] = denorm(model(x)[0, 0].cpu().numpy())
-            psnr_list.append(peak_signal_noise_ratio(norm(gt[z]), norm(out[z]), data_range=1.0))
-            ssim_list.append(structural_similarity(norm(gt[z]), norm(out[z]), data_range=1.0))
-    out.astype(np.float32).tofile(os.path.join(args.result_dir, f'{patient}_rec_corrected.raw'))
-    np.save(os.path.join(args.result_dir, f'{patient}_out.npy'), out)
-    to_png(inp[80], os.path.join(args.result_dir, f'{patient}_z80_input.png'))
-    to_png(out[80], os.path.join(args.result_dir, f'{patient}_z80_output.png'))
-    to_png(gt[80],  os.path.join(args.result_dir, f'{patient}_z80_gt.png'))
-    print(f'{patient}: PSNR={np.mean(psnr_list):.3f} dB, SSIM={np.mean(ssim_list):.4f}')
-```
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--weights` | 必填 | 训练权重 `net_g_latest.pth` |
+| `--data_root` | `/root/autodl-tmp/联影双能相位数据2080` | 数据根目录；本地务必显式传 |
+| `--patient` | 必填，可多个 | 病人文件夹（空格分隔） |
+| `--result_dir` | `./results/ct` | 输出目录 |
+| `--config` | `Options/CT_ImageDomain_Restormer.yml` | 训练 yml（网络结构 + `hu_min/hu_max`） |
+| `--hu_min` / `--hu_max` | 读 yml（-1000/1000） | 覆盖归一化窗口 |
 
 运行（默认推理验证集 3 个病人）：
 
 ```bash
 python test_ct.py --weights experiments/CT_ImageDomain_Restormer/models/net_g_latest.pth \
+                  --data_root /root/autodl-tmp/联影双能相位数据2080 \
                   --patient 72278_406010_960+_AXIAL_CE1_F071Y_20211216_Thick1_Incre1 \
                            91963_301643_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1 \
                            91963_53624_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1
 ```
 
-> PSNR/SSIM 在**归一化域**（`[0,1]`，`data_range=1.0`）计算，和 AICTVer2 `metrics.compute_psnr(mse, max_val=1.0)` 口径一致，用于相对比较；不等于 HU 域的绝对值。
+> `--data_root` 默认就是上面的服务器路径；**在本地（WSL/Windows）跑推理务必显式传 `--data_root` 指向本地数据目录**（如 `/mnt/d/...`）。
+
+> PSNR/SSIM 在 **HU 原始值域**计算，`data_range = 每卷/每层的 max-min`（同 AICT-code `infer.py` 口径），用于相对比较。注意这与训练日志里 val 的 PSNR（归一化域）不是同一量纲，绝对值不可直接比。
 
 ---
 
@@ -607,14 +559,27 @@ python basicsr/train.py -opt Options/CT_ProjectionDomain_Restormer.yml --launche
 # 推理（test_ct_proj.py 已在仓库）
 python test_ct_proj.py \
     --weights experiments/CT_ProjectionDomain_Restormer/models/net_g_latest.pth \
+    --data_root /root/autodl-tmp/联影双能相位数据2080 \
     --patient 72278_406010_960+_AXIAL_CE1_F071Y_20211216_Thick1_Incre1 \
               91963_301643_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1 \
               91963_53624_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1
 ```
 
+**`test_ct_proj.py` 参数**：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--weights` | 必填 | 训练权重 `net_g_latest.pth` |
+| `--data_root` | `/root/autodl-tmp/联影双能相位数据2080` | 数据根目录；本地务必显式传 |
+| `--patient` | 必填，可多个 | 病人文件夹（空格分隔） |
+| `--result_dir` | `./results/ct_proj` | 输出目录 |
+| `--config` | `Options/CT_ProjectionDomain_Restormer.yml` | 训练 yml（网络结构 + `proj_crop_rows` / `proj_norm_clip_max`） |
+| `--crop_rows` | 读 yml（默认 16） | 覆盖黑边裁剪行数 |
+| `--proj_clip_max` | 读 yml（默认 0.28） | 覆盖投影域归一化上限 |
+
 ### 9.4 评估/交付提醒
 
-- 投影域输出是「校正后的视角」，**要看效果必须重建**。`test_ct_proj.py` 用 skimage `iradon`（**平行束近似**，数据是扇/锥束）做定性 FBP 验证，并保存 `*_proj_corrected.raw` 供你的重建流程使用；精确几何请用你 AICTVer2 的重建代码。
+- 投影域输出是「校正后的视角」，**要看效果必须重建**。`test_ct_proj.py` 只产出 `<病人>_pred/input/gt.raw` 三种 `.raw`（input/gt 已按 `proj_crop_rows` 裁黑边、与 pred 同形状 `(720,96,512)`）+ 终端 MSE/RMSE/MAE/PSNR/SSIM，**不含重建**。要图像域结果，把 `<病人>_pred.raw` 接你的重建流程（精确几何用你 AICTVer2 的重建代码）。
 - 也可顺带用你的 `DenseUNet_ProjCT` 基线在**同一批视角**上做对比。
 
 ---
@@ -645,6 +610,6 @@ python test_ct_proj.py \
 | 新增 | `basicsr/data/ct_image_dataset.py` | 第 5 节，统一 `Dataset_CT`（`domain` 切换图像域/投影域） |
 | 新增 | `Options/CT_ImageDomain_Restormer.yml` | 第 6 节，`domain: image` |
 | 新增 | `Options/CT_ProjectionDomain_Restormer.yml` | 第 9.2 节，`domain: proj` |
-| 新增 | `test_ct.py` | 第 8 节，图像域推理 |
-| 新增 | `test_ct_proj.py` | 第 9.3 节，投影域推理 + FBP 验证 |
+| 新增 | `test_ct.py` | 第 8 节，图像域推理（产出 `<病人>_pred/input/gt.raw` + 指标） |
+| 新增 | `test_ct_proj.py` | 第 9.3 节，投影域推理（产出 `<病人>_pred/input/gt.raw` + 指标） |
 | 环境 | conda + pip | 第 2 节命令 |

@@ -207,39 +207,73 @@ python basicsr/train.py -opt Options/CT_ProjectionDomain_Restormer.yml --launche
 
 ## 7. 推理 / 评估
 
+> **`--data_root` 必填注意**：`test_ct.py` / `test_ct_proj.py` 的 `--data_root` 默认都是服务器路径 `/root/autodl-tmp/联影双能相位数据2080`。**在本地（WSL/Windows）跑推理必须显式传 `--data_root`** 指向本地数据目录（如 `/mnt/d/.../联影双能相位数据2080`），否则读不到数据、报 PermissionError。
+
 ### 图像域
 
 ```bash
 python test_ct.py \
     --weights experiments/CT_ImageDomain_Restormer/models/net_g_latest.pth \
+    --data_root /root/autodl-tmp/联影双能相位数据2080 \
     --patient 72278_406010_960+_AXIAL_CE1_F071Y_20211216_Thick1_Incre1 \
               91963_301643_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1 \
               91963_53624_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1
 ```
 
-输出到 `results/ct/`：`*_rec_corrected.raw` / `*_out.npy` / `*_z80_*.png` + 终端 PSNR/SSIM。
+**`test_ct.py` 参数**：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--weights` | 必填 | 训练权重 `net_g_latest.pth` |
+| `--data_root` | `/root/autodl-tmp/联影双能相位数据2080` | 数据根目录；本地推理必须显式传 |
+| `--patient` | 必填，可多个 | 要推理的病人文件夹（空格分隔） |
+| `--result_dir` | `./results/ct` | 输出目录 |
+| `--config` | `Options/CT_ImageDomain_Restormer.yml` | 训练 yml：取网络结构 + `hu_min/hu_max` |
+| `--hu_min` | 读 yml（默认 -1000） | 覆盖归一化下限 |
+| `--hu_max` | 读 yml（默认 1000） | 覆盖归一化上限 |
+
+输出到 `results/ct/`：
+
+| 文件 | 内容 |
+|------|------|
+| `<病人>_pred.raw` | 校正后体积（float32 HU，`(158,512,512)`） |
+| `<病人>_input.raw` | 输入切片（已剔首尾，与 pred 同形状） |
+| `<病人>_gt.raw` | 目标切片（同上，与 pred 同形状） |
+| 终端打印 | input vs gt / pred vs gt 的 MSE·RMSE·MAE·PSNR·SSIM（HU 值域，同 AICT-code infer.py） |
 
 ### 投影域
 
 ```bash
 python test_ct_proj.py \
     --weights experiments/CT_ProjectionDomain_Restormer/models/net_g_latest.pth \
+    --data_root /root/autodl-tmp/联影双能相位数据2080 \
     --patient 72278_406010_960+_AXIAL_CE1_F071Y_20211216_Thick1_Incre1 \
               91963_301643_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1 \
               91963_53624_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1
 ```
 
+**`test_ct_proj.py` 参数**：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--weights` | 必填 | 训练权重 `net_g_latest.pth` |
+| `--data_root` | `/root/autodl-tmp/联影双能相位数据2080` | 数据根目录；本地推理必须显式传 |
+| `--patient` | 必填，可多个 | 要推理的病人文件夹（空格分隔） |
+| `--result_dir` | `./results/ct_proj` | 输出目录 |
+| `--config` | `Options/CT_ProjectionDomain_Restormer.yml` | 训练 yml：取网络结构 + `proj_crop_rows` / `proj_norm_clip_max` |
+| `--crop_rows` | 读 yml（默认 16） | 覆盖黑边裁剪行数（input/gt 按它裁，保证三卷同形状） |
+| `--proj_clip_max` | 读 yml（默认 0.28） | 覆盖投影域归一化上限 |
+
 输出到 `results/ct_proj/`：
 
 | 文件 | 内容 |
 |------|------|
-| `*_proj_corrected.raw` | 校正后 sinogram 体积（float32，`(720,96,512)`，可直接接你的重建流程） |
-| `*_proj_out.npy` | 同上，numpy 格式 |
-| `*_v360_input/output/gt.png` | 第 360 视角可视化对比 |
-| `*_fbp_row64.png` / `*_fbp_row64_gt.png` | FBP 重建（pred vs GT，平行束近似） |
-| 终端打印 | sinogram 域 PSNR/SSIM + FBP 重建域 PSNR（定性） |
+| `<病人>_pred.raw` | 校正后 sinogram 体积（float32，`(720,96,512)`，可直接接你的重建流程） |
+| `<病人>_input.raw` | 输入投影（已按 `proj_crop_rows` 裁黑边，与 pred 同形状） |
+| `<病人>_gt.raw` | 目标投影（同上裁剪，与 pred 同形状） |
+| 终端打印 | input vs gt / pred vs gt 的 MSE·RMSE·MAE·PSNR·SSIM（原始值域，同 AICT-code infer.py） |
 
-> 投影域 sinogram 上的 PSNR 只用于训练监控；**最终验收看 FBP 到图像域后的质量**。`skimage` 的 `iradon` 是平行束近似（数据是扇/锥束），精确几何请用 AICT-code 的重建代码。
+> 投影域 `.raw` 是「校正后的 sinogram」，**要看图像效果必须重建**——把 `<病人>_pred.raw` 接你的重建流程（几何参数用扫描协议 / AICT-code 的），脚本本身不含重建。
 > 对比 AICTVer2 基线时，用同一批验证病人、同一 `clip(x,0,0.28)/0.28` 归一化跑它那边的评估再比。
 
 ---

@@ -126,12 +126,13 @@ nvidia-smi
 
 ```bash
 python test_ct.py --weights experiments/CT_ImageDomain_Restormer/models/net_g_latest.pth \
+    --data_root /root/autodl-tmp/联影双能相位数据2080 \
     --patient 72278_406010_960+_AXIAL_CE1_F071Y_20211216_Thick1_Incre1 \
               91963_301643_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1 \
               91963_53624_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1
 ```
 
-输出到 `results/ct/`：校正后 `.raw`（写回 HU）、可视化 PNG、终端打印 PSNR/SSIM。
+输出到 `results/ct/`：`<病人>_pred/input/gt.raw`（input/gt 已剔首尾切片、与 pred 同形状）+ 终端 MSE/RMSE/MAE/PSNR/SSIM（HU 值域）。投影域推理用 `test_ct_proj.py`，产出同理（`proj_crop_rows` 裁黑边、三卷同形状）。
 
 ---
 
