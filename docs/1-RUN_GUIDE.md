@@ -1,8 +1,15 @@
-# Restormer 运行指南（双能相位 CT 束硬化 / 相位模糊伪影校正）
+# Restormer 运行指南（CT 束硬化 / 相位模糊伪影校正）
 
-> 适用数据：`DATASET_FORMAT.md` 描述的 13 个病人 `.raw` 数据（服务器上位于 `/root/autodl-tmp/联影双能相位数据2080`）。
+> **本项目支持两套数据集**，先按下表确定你要跑哪一套：
+
+| 数据集 | 服务器目录 | 可用域 | 训练 yml | prepare 脚本 | 专项文档 |
+|--------|-----------|--------|----------|--------------|----------|
+| 联影双能相位 | `/root/autodl-tmp/联影双能相位数据2080`（13 病人） | 图像域 + 投影域 | `CT_ImageDomain_Restormer.yml`<br>`CT_ProjectionDomain_Restormer.yml` | `prepare_ct_data.py`<br>`prepare_ct_proj_data.py` | `DATASET_FORMAT.md` |
+| 西门子 PBI | `/mnt/tm/ximenzi_pbi_data`（30 病人，本项目用 `01`~`20`） | **仅投影域**（无重建数据） | `CT_ProjectionDomain_Ximenzi_Restormer.yml` | `prepare_ximenzi_proj_data.py` | **[6-XIMENZI_ADAPTATION.md](6-XIMENZI_ADAPTATION.md)** |
+
+> **本文档正文以联影数据集为例**（它有重建数据，图像域/投影域都能跑）。西门子数据集的完整步骤——尤其是**必须先跑 `analyze_proj_range.py` 标定 `proj_norm_clip_max`**——见 [6-XIMENZI_ADAPTATION.md](6-XIMENZI_ADAPTATION.md)。两套的逐项差异汇总在第 9.5 节。
 > 目标任务：以「模糊相位校正后的重建/投影」（含伪影）为输入，恢复「无相位束硬化校正的干净重建/投影」。
-> 本文档已与你的历史训练代码 `C:\imageReconstruction\AICTVer2` 对齐（病人划分来自 `patients.yaml`，归一化、投影域做法与其一致）。
+> 本文档已与你的历史训练代码 `C:\imageReconstruction\AICTVer2` 对齐（联影部分的病人划分来自 `patients.yaml`，归一化、投影域做法与其一致）。
 > 本文档回答两个问题：**怎么跑这个项目**、**用图像域还是投影域训练**。
 
 ---
@@ -10,6 +17,7 @@
 ## 0. 结论速览（TL;DR）
 
 - **推荐用「图像域」训练**：直接对 `512×512` 的 CT 切片对（输入 `rec_pbi_fs_dec_blur_phase_100000.raw`，目标 `rec_no_pbi.raw`）做 2D 去伪影 + 去模糊。这与你在 AICTVer2 里的 `DenseUNet_PhaseCT` 是同一域、同一任务，可直接做模型对比（DenseUNet2d vs Restormer）。
+  - ⚠️ **这条只对「联影」数据集成立**。西门子数据集没有重建数据，**只能跑投影域**（`CT_ProjectionDomain_Ximenzi_Restormer.yml`），见 [6-XIMENZI_ADAPTATION.md](6-XIMENZI_ADAPTATION.md)。
 - **三个决定性理由**：
   1. 这个仓库本质是 **2D 图像恢复框架**（Restormer 是 2D Transformer），图像域直接产出最终要交付的 CT 图像；
   2. **Restormer 仓库里没有任何 CT 重建（FBP）代码** —— 投影域训练得到的是「校正后的 sinogram」，无法在这个仓库里直接变回图像来验证/交付（你 AICTVer2 里有 ProjCT 管线，但本项目没有重建环节）；
@@ -57,7 +65,7 @@ basicsr/train.py -opt xxx.yml       启动训练（命令行入口）
 ### 2.1 硬件
 
 - **至少 1 张 ≥ 12GB 显存的 GPU** 即可开始；24GB 更舒服。
-- 数据总共约 8.8GB、13 个病人，**单卡完全够**。多卡只是更快，不是必须。
+- 数据量：联影约 8.8GB / 13 病人，西门子约 3.8GB / 病人（本项目用 20 个）。**单卡完全够**，多卡只是更快，不是必须。
 
 ### 2.2 软件依赖
 
@@ -109,6 +117,8 @@ python -c "from basicsr.models.archs.restormer_arch import Restormer; print('res
 | 与你的基线可比性 | 直接对标 `DenseUNet_PhaseCT` | 对标 `DenseUNet_ProjCT` |
 | 实现成本 | 低（现成代码） | 低（同一个 `Dataset_CT`，`domain: proj` 即切换，见第 9 节） |
 
+> 📌 上表的样本数是**联影数据集**的（10 病人）。**西门子数据集没有重建数据，上表「图像域」一列对它不适用**——只能跑投影域，样本数 15000（15 病人 × 1000 视角）。见 [6-XIMENZI_ADAPTATION.md](6-XIMENZI_ADAPTATION.md)。
+
 ### 3.1 为什么推荐图像域
 
 1. **闭环交付**：Restormer 输出直接是图像，PSNR/SSIM 直接衡量你真正关心的东西。投影域训练完你连「效果好不好」都看不到——除非在 Restormer 仓库外再套一层重建（ASTRA / cuCIM 等），那属于另一个工程。
@@ -129,6 +139,8 @@ python -c "from basicsr.models.archs.restormer_arch import Restormer; print('res
 ## 4. 数据准备（图像域）
 
 ### 4.1 数据位置与目录结构
+
+> 本节（第 4 节）及第 6、8 节讲的都是**联影数据集的图像域**。西门子数据集**没有重建数据，跑不了图像域**，请直接跳到第 9.5 节。
 
 数据在服务器 `/root/autodl-tmp/联影双能相位数据2080`，13 个病人文件夹（每个含 4 个 .raw）。**路径含中文，Linux 下 UTF-8 没问题**，但索引文件编码要处理（第 5 节数据集代码已做兼容）。
 
@@ -212,10 +224,12 @@ img_norm = clip((HU - hu_min) / (hu_max - hu_min), 0, 1)，其中 hu_min=-1000, 
 - `domain: proj` → 读 `proj_*.raw` 视角 `(128,512)`，`clip(x,0,0.28)/0.28` 归一化、`proj_crop_rows` 裁黑边（同 AICTVer2 `proj_reader`）。
 
 ```python
-## 双能相位 CT 数据集：通过 yml 的 domain 一键切换 图像域/投影域
-## domain = 'image' -> 读 rec_*.raw 切片 (512,512)，HU 归一化
-## domain = 'proj'  -> 读 proj_*.raw 视角 (128,512)，clip 归一化（同 AICT proj_reader）
+## CT 数据集：通过 yml 的 domain 一键切换 图像域/投影域
+## domain = 'image' -> 读 rec_*.raw 切片，HU 归一化
+## domain = 'proj'  -> 读 proj_*.raw 视角平面，clip 归一化（同 AICT proj_reader）
 ## 索引文件每行: <输入raw> <目标raw> <索引>（image=切片号z，proj=视角号v）
+##
+## 形状 / 裁剪量 / 归一化尺度全部由 yml 提供，换数据集无需改代码（见下方参数表）
 import locale
 import numpy as np
 from torch.utils import data as data
@@ -245,15 +259,25 @@ class Dataset_CT(data.Dataset):
         self.hu_min = float(opt.get('hu_min', -1000.0))
         self.hu_range = float(opt.get('hu_max', 1000.0)) - self.hu_min
         # 投影域参数（同 AICT-code proj_reader）
-        self.proj_norm_clip_max = float(opt.get('proj_norm_clip_max', 0.28))
+        # clip_max 决定归一化尺度，必须按当前数据集实测标定：
+        # 投影域下留空/缺失直接报错，不再静默回退到别的数据集的旧值。
+        clip_max = opt.get('proj_norm_clip_max', None)
+        if self.domain == 'proj' and clip_max is None:
+            raise ValueError("投影域缺少 proj_norm_clip_max（或留空为 ~）……")
+        self.proj_norm_clip_max = float(clip_max) if clip_max is not None else None
         self.proj_crop_rows = int(opt.get('proj_crop_rows', 0))
+        self.proj_crop_cols = int(opt.get('proj_crop_cols', 0))
+
+        # 体积形状（缺省值 = 联影数据集，旧 yml 不加字段行为不变）
+        self.image_shape = tuple(opt.get('image_shape', (160, 512, 512)))
+        self.proj_shape = tuple(opt.get('proj_shape', (720, 128, 512)))
 
         self.geometric_augs = opt.get('geometric_augs', True)
         self._vol_cache = {}
 
     def _volume(self, path):
         if path not in self._vol_cache:
-            shape = (160, 512, 512) if self.domain == 'image' else (720, 128, 512)
+            shape = self.image_shape if self.domain == 'image' else self.proj_shape
             self._vol_cache[path] = np.memmap(
                 path, dtype=np.float32, mode='r', shape=shape)
         return self._vol_cache[path]
@@ -277,10 +301,13 @@ class Dataset_CT(data.Dataset):
         if self.domain == 'image':
             img_lq, img_gt = inp_vol[idx], gt_vol[idx]        # (512,512) 切片
         else:
-            img_lq, img_gt = inp_vol[idx], gt_vol[idx]        # (128,512) 视角
-            if self.proj_crop_rows > 0:                        # 裁上下黑边
-                img_lq = img_lq[self.proj_crop_rows:-self.proj_crop_rows, :]
-                img_gt = img_gt[self.proj_crop_rows:-self.proj_crop_rows, :]
+            img_lq, img_gt = inp_vol[idx], gt_vol[idx]        # (H,W) 视角平面
+            r, c = self.proj_crop_rows, self.proj_crop_cols
+            if r or c:                                         # 裁上下/左右黑边
+                # 用显式上下界而非 [r:-r]：后者在 r=0 时会得到空数组
+                h, w = img_lq.shape
+                img_lq = img_lq[r:h - r, c:w - c]
+                img_gt = img_gt[r:h - r, c:w - c]
 
         img_lq = np.expand_dims(self._norm(img_lq), axis=2)   # (H,W,1)
         img_gt = np.expand_dims(self._norm(img_gt), axis=2)
@@ -304,6 +331,22 @@ class Dataset_CT(data.Dataset):
 # 兼容别名：旧的 type: Dataset_CTImage 仍可用（等价 domain: image）
 Dataset_CTImage = Dataset_CT
 ```
+
+**`Dataset_CT` 从 yml 读取的全部参数**（换数据集只改这些，不必碰代码）：
+
+| yml 字段 | 默认值 | 作用 | 联影 | 西门子 |
+|----------|--------|------|------|--------|
+| `domain` | `image` | 域开关 | `proj` | `proj` |
+| `image_shape` | `[160,512,512]` | 图像域体积形状 | 缺省 | 不适用（无重建数据） |
+| `proj_shape` | `[720,128,512]` | 投影域平面形状 `(视角数, H, W)` | 缺省 | **`[1000,500,500]`** |
+| `proj_crop_rows` | `0` | 上下各裁多少行 | `16` | **`122`**（→256 行） |
+| `proj_crop_cols` | `0` | 左右各裁多少列 | `0` | **`2`**（→496 列） |
+| `proj_norm_clip_max` | **无默认值** | 投影域归一化上界 | `0.28` | **待 `analyze_proj_range.py` 标定** |
+| `hu_min` / `hu_max` | `-1000` / `1000` | 图像域 HU 窗口 | `-1000/1000` | 不适用 |
+| `geometric_augs` | `true` | 几何增强（投影域须 `false`） | 投影域 `false` | `false` |
+| `txt` | 必填 | 索引文件路径 | `train_proj_img.txt` 等 | `train_ximenzi_proj.txt` 等 |
+
+> ⚠️ **投影域下 `proj_norm_clip_max` 是必填的**：留空（`~`）或缺失会让 dataset 直接 `raise ValueError`，而不是静默套用某个默认值。这是刻意的——归一化尺度选错会白白浪费动态范围，且不会被察觉。标定方法见 [6-XIMENZI_ADAPTATION.md](6-XIMENZI_ADAPTATION.md) 第四节。
 
 > 旧版 `Dataset_CTImage` 已并入 `Dataset_CT`（`domain: image` 路径行为完全不变），末尾保留 `Dataset_CTImage = Dataset_CT` 别名，老 yml 不换也能跑。
 >
@@ -517,7 +560,9 @@ python test_ct.py --weights experiments/CT_ImageDomain_Restormer/models/net_g_la
 
 ---
 
-## 9. （可选）投影域方案（对齐你的 ProjCT 做法，`domain: proj`）
+## 9. 投影域方案（对齐你的 ProjCT 做法，`domain: proj`）
+
+> **本节 9.1~9.4 的数值是「联影数据集」的**。西门子数据集的投影域步骤见 **9.5**，两者只有几何/归一化参数不同，代码路径完全一样。
 
 你 AICTVer2 的 ProjCT 是**按视角**处理的：每个视角是一个 `128×512` 的探测器平面（1 通道），归一化 `clip [0, 0.28] → [0,1]`，并 `crop_rows=16` 裁掉上下黑边。Restormer 这边**不用另写数据集**——第 5 节的 `Dataset_CT` 里 `domain: proj` 就是这套逻辑。你要做的只是**换索引 + 换 yml**：
 
@@ -548,7 +593,9 @@ TRAIN / VALID 划分与图像域完全一致（见第 4.3 节）。
 
 完整配置即仓库里的 `Options/CT_ProjectionDomain_Restormer.yml`（网络 `inp_channels: 1` 不变）。
 
-> ⚠️ **`gt_sizes` 最大值必须 ≤ 96**（`crop_rows=16` 后高度）。框架 `padding()` 会把样本补到 `gt_size`，若沿用 256 会训练在大部分人造反射边上。48/64/80/96 都是 8 的倍数，Restormer 3 次下采样无奇偶问题。
+> ⚠️ **`gt_sizes` 最大值必须 ≤ 裁剪后平面的短边**。联影：`128 - 2×16 = 96` 行 → 上限 96。框架 `padding()` 会把样本补到 `gt_size`，若沿用 256 会训练在大部分人造反射边上。`48/64/80/96` 都是 8 的倍数，Restormer 3 次下采样无奇偶问题。
+>
+> ⚠️ 这条是**硬约束**：`paired_random_crop` 要求 `平面边长 >= gt_size`，否则直接抛 `ValueError: LQ (...) is smaller than patch size`。所以换数据集时**必须先按新平面尺寸重算 `gt_size`**——西门子裁剪后是 256×496，故 `gt_size: 192`。
 
 ### 9.3 训练 / 推理
 
@@ -570,34 +617,82 @@ python test_ct_proj.py \
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--weights` | 必填 | 训练权重 `net_g_latest.pth` |
-| `--data_root` | `/root/autodl-tmp/联影双能相位数据2080` | 数据根目录；本地务必显式传 |
-| `--patient` | 必填，可多个 | 病人文件夹（空格分隔） |
+| `--txt` | 无 | **推荐**：索引 txt（路径已写在文件里，无需 `--data_root`）。与 `--patient` 二选一 |
+| `--patient` | 无 | 病人文件夹（空格分隔）；需配合 `--data_root` / `--inp_name` |
+| `--data_root` | `/root/autodl-tmp/联影双能相位数据2080` | 仅在 `--patient` 模式下使用；本地务必显式传 |
+| `--inp_name` / `--gt_name` | 联影文件名 | 仅在 `--patient` 模式下用于拼路径 |
 | `--result_dir` | `./results/ct_proj` | 输出目录 |
-| `--config` | `Options/CT_ProjectionDomain_Restormer.yml` | 训练 yml（网络结构 + `proj_crop_rows` / `proj_norm_clip_max`） |
-| `--crop_rows` | 读 yml（默认 16） | 覆盖黑边裁剪行数 |
-| `--proj_clip_max` | 读 yml（默认 0.28） | 覆盖投影域归一化上限 |
+| `--config` | `Options/CT_ProjectionDomain_Restormer.yml` | 训练 yml（网络结构 + `proj_shape` / 裁剪量 / `proj_norm_clip_max`） |
+| `--crop_rows` / `--crop_cols` | 读 yml | 覆盖黑边裁剪量 |
+| `--proj_clip_max` | 读 yml | 覆盖投影域归一化上限 |
+
+> 形状、视角数、裁剪量全部从 `--config` 指向的 yml 推导，脚本内不再有数据集相关的魔数。推理前会把平面 reflect 补齐到 8 的倍数、输出再裁回（与验证集的 `pad_test` 一致），所以平面边长不是 8 的倍数也能跑。
 
 ### 9.4 评估/交付提醒
 
-- 投影域输出是「校正后的视角」，**要看效果必须重建**。`test_ct_proj.py` 只产出 `<病人>_pred/input/gt.raw` 三种 `.raw`（input/gt 已按 `proj_crop_rows` 裁黑边、与 pred 同形状 `(720,96,512)`）+ 终端 MSE/RMSE/MAE/PSNR/SSIM，**不含重建**。要图像域结果，把 `<病人>_pred.raw` 接你的重建流程（精确几何用你 AICTVer2 的重建代码）。
+- 投影域输出是「校正后的视角」，**要看效果必须重建**。`test_ct_proj.py` 只产出 `<病人>_pred/input/gt.raw` 三种 `.raw`（input/gt 已按 yml 的裁剪量裁黑边、与 pred 同形状：联影 `(720,96,512)`、西门子 `(1000,256,496)`）+ 终端 MSE/RMSE/MAE/PSNR/SSIM，**不含重建**。要图像域结果，把 `<病人>_pred.raw` 接你的重建流程（精确几何用你 AICTVer2 的重建代码）。
 - 也可顺带用你的 `DenseUNet_ProjCT` 基线在**同一批视角**上做对比。
+
+---
+
+### 9.5 西门子 PBI 数据集（`ximenzi_pbi_data`）
+
+完整说明见 [6-XIMENZI_ADAPTATION.md](6-XIMENZI_ADAPTATION.md)，这里给出最简跑通路径。
+
+**与联影的关键差异**：
+
+| | 联影 | 西门子 PBI |
+|---|---|---|
+| 输入文件 | `proj_pbi_fs_dec_blur_phase_100000.raw` | `proj_pbi_fs_dec_blur_phase.raw`（**无 `_100000`**） |
+| 平面形状 | `(720, 128, 512)` | **`(1000, 500, 500)`** |
+| 裁剪后平面 | `(720, 96, 512)` | **`(1000, 256, 496)`** |
+| 归一化 | `clip(x,0,0.28)/0.28` | **须重新标定**（实测 max ≈ 0.094，沿用 0.28 会浪费 2/3 动态范围） |
+| 划分 | 13 病人 → 10 训 / 3 验 | 20 病人 → 15 训 / 3 验 / 2 测 |
+| 样本数 | 7200 / 2160 | **15000 / 3000 / 2000** |
+| 重建数据 | 有（可跑图像域） | **无（只能跑投影域）** |
+
+**步骤**：
+
+```bash
+# 1) 生成索引（脚本会校验每个 .raw 恰为 1,000,000,000 字节）
+python prepare_ximenzi_proj_data.py --data-root /mnt/tm/ximenzi_pbi_data --output ./
+#    → train_ximenzi_proj.txt (15000) / valid_ximenzi_proj.txt (3000) / test_ximenzi_proj.txt (2000)
+
+# 2) [!] 标定归一化尺度，把输出值填进 yml 的 train 和 val 两处
+python analyze_proj_range.py --data-root /mnt/tm/ximenzi_pbi_data
+
+# 3) 训练
+python basicsr/train.py -opt Options/CT_ProjectionDomain_Ximenzi_Restormer.yml --launcher none
+
+# 4) 推理（--txt 模式，不需要 --data_root）
+python test_ct_proj.py \
+    --weights experiments/CT_ProjectionDomain_Ximenzi_Restormer/models/net_g_latest.pth \
+    --config Options/CT_ProjectionDomain_Ximenzi_Restormer.yml \
+    --txt ./test_ximenzi_proj.txt
+```
+
+> ⚠️ **第 2 步不能跳过**。新 yml 里 `proj_norm_clip_max` 留的是 `~`，dataset 读到会直接报错并提示你跑这个脚本。这是刻意的——该值必须按数据实测，不能沿用联影的 0.28。
+
+> ⚠️ **裁剪量不要按内容边界裁列**。实测目标在行 `[118,381]` 外恒为 0（边界外能量 0.000000%），但列方向各视角的投影足迹宽度不同（全 1000 视角并集才是列 `[0,499]`），不存在对全部视角都无损的固定列裁剪值。yml 取 `crop_rows: 122 / crop_cols: 2` → 256×496（同时满足 8 和 16 整除），代价是目标能量损失 1.74% + 0.018%。
 
 ---
 
 ## 10. 常见问题与注意事项
 
-1. **首尾切片无信号**：图像域索引文件取 `z=1..158`（第 4.3 节已处理）；投影域首尾视角（0/719）可能有运动伪影，如确认可改成 `1..719`。
+1. **首尾切片无信号**：联影图像域索引取 `z=1..158`（第 4.3 节已处理）；投影域首尾视角（0/719）可能有运动伪影，如确认可改成 `1..719`。西门子数据集抽查 slice 0/500/999 统计量均正常、无退化，默认全用 1000 个视角（`analyze_proj_range.py` 的输出⑤ 会对全体病人复核这一点）。
 2. **别用 8-bit PNG 存切片当训练数据**：会把 HU 精度量化到 ~4HU/级。要么直接读 .raw（推荐，第 5 节 memmap 方案），要么存 16-bit/float `.npy`。
-3. **数据量小（13 病人）容易过拟合**：图像域建议 `mixup: true`、开几何增强（`geometric_augs: true`）；**投影域保持 `geometric_augs: false`**（90° 旋转物理无意义）、可尝试开 `mixup`。监控 val PSNR 是否随训练掉头；可加 5 折交叉验证（每次留不同病人做 val）看稳定性。
+3. **数据量小（联影 13 病人）容易过拟合**：图像域建议 `mixup: true`、开几何增强（`geometric_augs: true`）；**投影域保持 `geometric_augs: false`**（90° 旋转物理无意义）、可尝试开 `mixup`。监控 val PSNR 是否随训练掉头；可加 5 折交叉验证（每次留不同病人做 val）看稳定性。**西门子数据样本更多（15000 vs 7200），`mixup` 保持 `false`。**
 4. **划分已考虑域差异**：你的 `patients.yaml` 把唯一的平扫病人 18537 放进了训练集，验证集全为增强（CE1），训练/验证域分布接近，这点比 `DATASET_FORMAT.md` 的原始建议更稳。
 5. **PSNR 口径**：默认 `use_image: false` 在归一化张量上算，与 AICTVer2 `compute_psnr(max_val=1.0)` 一致；不要和 HU 域的论文 PSNR 直接比。
-6. **旧索引文件作废**：AICTVer2 目录里的 `train_img.txt`/`valid_img.txt` 是旧划分 + Windows 路径，务必在服务器上用第 4.3 节脚本重新生成（生成后用 `head` 确认路径是 `/root/autodl-tmp/联影双能相位数据2080/...`）。
+6. **旧索引文件作废**：AICTVer2 目录里的 `train_img.txt`/`valid_img.txt` 是旧划分 + Windows 路径，务必在服务器上用第 4.3 节脚本重新生成（生成后用 `head` 确认路径是 `/root/autodl-tmp/联影双能相位数据2080/...`）。西门子的索引同理，用 `prepare_ximenzi_proj_data.py` 生成，且**不要在本地生成后拷到服务器**（txt 里写的是绝对路径）。
 7. **PyTorch 2.6+**：`torch.load` 默认 `weights_only=True`，若断点续训/加载报 `weights_only` 相关错误，装 `torch<2.6`，或在 `basicsr/models/base_model.py` 的 `torch.load` 加 `weights_only=False`。
 8. **多卡**：`dist_params.backend: nccl`，确保 `--nproc_per_node` 与本机 GPU 数一致；日志里 `LOCAL_RANK` 相关的验证只在 rank 0 执行，属正常。
 9. **内存**：图像域和投影域数据集统一用 `np.memmap` 惰性映射（不显式占 RAM，比 AICTVer2 的整卷 `fromfile` 快且省）；投影域按视角随机访问单视角，语义等同 AICT `proj_reader` 的 seek 读取。
 10. **progressive training**：`iters` 各阶段之和必须等于 `train.total_iter`，`mini_batch_sizes` 与 `gt_sizes` 长度一致；改 batch 时两者同步改。
 11. **对比基线时统一测试集**：跟 `DenseUNet_PhaseCT` 对比时，用同一验证集（72278、91963×2）同一归一化窗口跑完 AICTVer2 的 `test.py` 再比 PSNR。
-12. **投影域 patch 上限与参数名**：`gt_sizes` 最大值必须 ≤ `128 - 2*proj_crop_rows`（默认 96）；投影域归一化/裁剪参数名是 `proj_norm_clip_max` / `proj_crop_rows`（不是 `norm_clip_max` / `crop_rows`）。
+12. **投影域 patch 上限与参数名**：`gt_sizes` 最大值必须 ≤ 裁剪后平面的短边 = `min(H − 2·proj_crop_rows, W − 2·proj_crop_cols)`，否则 `paired_random_crop` 直接抛 `ValueError: LQ (...) is smaller than patch size`。联影：`128−2×16 = 96`；西门子：`min(500−244, 500−4) = 256`，配置取 `192`。参数名是 `proj_shape` / `proj_crop_rows` / `proj_crop_cols` / `proj_norm_clip_max`（**不是** `shape` / `crop_rows` / `norm_clip_max`）。
+13. **索引 txt 不进 git**：`.gitignore` 含 `*_img.txt` / `*_proj.txt`，索引文件必须在服务器上跑对应的 prepare 脚本生成，clone 下来是没有的。
+14. **换数据集的标准动作**：① 改 `proj_shape` / `proj_crop_rows` / `proj_crop_cols`；② 跑 `analyze_proj_range.py` 重标 `proj_norm_clip_max`；③ 按新平面短边重算 `gt_size`；④ 换 `txt`。**不需要改任何 `.py`**（`Dataset_CT` 已完全 yml 驱动）。
 
 ---
 
@@ -605,11 +700,14 @@ python test_ct_proj.py \
 
 | 操作 | 路径 | 内容 |
 |------|------|------|
-| 新增 | `prepare_ct_data.py` | 第 4.3 节，生成 `train_img.txt` / `valid_img.txt` |
-| 新增 | `prepare_ct_proj_data.py` | 第 9.1 节，生成 `train_proj_img.txt` / `valid_proj_img.txt` |
-| 新增 | `basicsr/data/ct_image_dataset.py` | 第 5 节，统一 `Dataset_CT`（`domain` 切换图像域/投影域） |
-| 新增 | `Options/CT_ImageDomain_Restormer.yml` | 第 6 节，`domain: image` |
-| 新增 | `Options/CT_ProjectionDomain_Restormer.yml` | 第 9.2 节，`domain: proj` |
+| 新增 | `prepare_ct_data.py` | 第 4.3 节，生成 `train_img.txt` / `valid_img.txt`（联影·图像域） |
+| 新增 | `prepare_ct_proj_data.py` | 第 9.1 节，生成 `train_proj_img.txt` / `valid_proj_img.txt`（联影·投影域） |
+| 新增 | `prepare_ximenzi_proj_data.py` | 第 9.5 节，生成 `train/valid/test_ximenzi_proj.txt`（西门子·投影域） |
+| 新增 | `basicsr/data/ct_image_dataset.py` | 第 5 节，统一 `Dataset_CT`（`domain` 切换图像域/投影域；形状/裁剪由 yml 提供） |
+| 新增 | `Options/CT_ImageDomain_Restormer.yml` | 第 6 节，`domain: image`（联影） |
+| 新增 | `Options/CT_ProjectionDomain_Restormer.yml` | 第 9.2 节，`domain: proj`（联影） |
+| 新增 | `Options/CT_ProjectionDomain_Ximenzi_Restormer.yml` | 第 9.5 节，`domain: proj`（西门子） |
+| 新增 | `analyze_proj_range.py` | 第 9.5 节，投影域真值域统计 / 标定 `proj_norm_clip_max` / 复核裁剪边界 |
 | 新增 | `test_ct.py` | 第 8 节，图像域推理（产出 `<病人>_pred/input/gt.raw` + 指标） |
-| 新增 | `test_ct_proj.py` | 第 9.3 节，投影域推理（产出 `<病人>_pred/input/gt.raw` + 指标） |
+| 新增 | `test_ct_proj.py` | 第 9.3 节，投影域推理（产出 `<病人>_pred/input/gt.raw` + 指标）；形状从 yml 推导，支持 `--txt` |
 | 环境 | conda + pip | 第 2 节命令 |

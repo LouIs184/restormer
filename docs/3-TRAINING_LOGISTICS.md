@@ -1,5 +1,15 @@
 # 训练后勤手册（产物位置 / 监控 / 断点 / TensorBoard）
 
+## ⚠️ 本仓库支持两套数据集
+
+| 数据集 | 服务器数据路径 | yml（决定实验目录名） | prepare 脚本 | 详细文档 |
+|--------|---------------|---------------------|-------------|---------|
+| **联影双能相位 CT**（原有） | `/root/autodl-tmp/联影双能相位数据2080`（13 个病人） | `Options/CT_ImageDomain_Restormer.yml`、`Options/CT_ProjectionDomain_Restormer.yml` | `prepare_ct_data.py`、`prepare_ct_proj_data.py` | [DATASET_FORMAT.md](../DATASET_FORMAT.md) |
+| **西门子 PBI**（新增，只有投影域） | `/mnt/tm/ximenzi_pbi_data`（本项目用 `01`~`20`） | `Options/CT_ProjectionDomain_Ximenzi_Restormer.yml` | `prepare_ximenzi_proj_data.py`（+ `analyze_proj_range.py` 标定） | [6-XIMENZI_ADAPTATION.md](6-XIMENZI_ADAPTATION.md) |
+
+> 两套数据集的产物目录不同（联影 `experiments/CT_*_Restormer/`，西门子 `experiments/CT_ProjectionDomain_Ximenzi_Restormer/`），**日志、断点、TensorBoard 都各自独立**。
+> 下文所有命令都**并列给出两套数据集**的写法；文中出现的联影专属数值（如 `/root/autodl-tmp/联影双能相位数据2080` 路径、样本数等）在西门子上不同，**西门子的对应值以 [6-XIMENZI_ADAPTATION.md](6-XIMENZI_ADAPTATION.md) 为准**。
+
 > 训练跑起来之后，"东西在哪、怎么盯、坏了怎么办"这类问题都在这。
 > 配套：执行流程见 [2-EXECUTION.md](2-EXECUTION.md)，配置参数见 [4-CONFIG_PARAMS.md](4-CONFIG_PARAMS.md)。
 
@@ -9,7 +19,7 @@
 
 ## 1. 训练产物保存在哪
 
-yml 里 `name: CT_ImageDomain_Restormer`，所有产物都在仓库内的 `experiments/` 下：
+实验目录名 = yml 里的 `name`，所有产物都在仓库内的 `experiments/` 下。以联影图像域（`name: CT_ImageDomain_Restormer`）为例：
 
 ```
 /root/imageReconstruction/restormer/
@@ -29,6 +39,8 @@ yml 里 `name: CT_ImageDomain_Restormer`，所有产物都在仓库内的 `exper
     └── CT_ImageDomain_Restormer/     # TensorBoard 数据
 ```
 
+> **西门子 PBI** 的产物骨架完全一样，只是实验目录名换成 yml 的 `name`：`experiments/CT_ProjectionDomain_Ximenzi_Restormer/`（权重/断点/日志/TensorBoard 都在其下，与联影互不干扰）。投影域（联影投影 + 西门子）目录名相应是 `CT_ProjectionDomain_Restormer` / `CT_ProjectionDomain_Ximenzi_Restormer`。
+
 | 文件 | 内容 | 大小 |
 |------|------|------|
 | `net_g_<iter>.pth` | 模型权重（仅 `params`） | ~104MB |
@@ -46,10 +58,12 @@ yml 里 `name: CT_ImageDomain_Restormer`，所有产物都在仓库内的 `exper
 **自动恢复，不用做任何事**：直接重跑训练命令，脚本会从 `training_states/` 里最新的 `.state` 自动续上：
 
 ```bash
-python basicsr/train.py -opt Options/CT_ImageDomain_Restormer.yml --launcher none
+python basicsr/train.py -opt Options/CT_ImageDomain_Restormer.yml --launcher none              # 联影·图像域
+python basicsr/train.py -opt Options/CT_ProjectionDomain_Restormer.yml --launcher none         # 联影·投影域
+python basicsr/train.py -opt Options/CT_ProjectionDomain_Ximenzi_Restormer.yml --launcher none # 西门子·投影域
 ```
 
-日志出现 `Resuming training from epoch: ..., iter: ...` 即成功恢复。
+日志出现 `Resuming training from epoch: ..., iter: ...` 即成功恢复。（每套数据集从各自实验目录的 `training_states/` 恢复，互不影响。）
 
 **续训需要成对的 `.pth` + `.state`**（`check_resume` 会用 `net_g_<iter>.pth` 恢复权重、`.state` 恢复优化器）。**清理旧快照必须按迭代成对删**，单删一个会导致该点无法续训：
 
@@ -67,9 +81,13 @@ rm experiments/CT_ImageDomain_Restormer/training_states/20000.state
 
 ```bash
 cd /root/imageReconstruction/restormer
-tail -f train_ct.log          # 后台跑时用的 nohup 日志
+tail -f train_ct.log          # 联影，后台跑时用的 nohup 日志
 # 或
 tail -f experiments/CT_ImageDomain_Restormer/train_*.log
+
+# 西门子 PBI（投影域）对应的日志
+tail -f train_ct_proj_ximenzi.log
+tail -f experiments/CT_ProjectionDomain_Ximenzi_Restormer/train_*.log
 ```
 
 关注点：`l_pix` 应逐步下降；每 1000 迭代出现一行 `Validation ValSet, # psnr: xx.xx`，PSNR 应逐步上升。
@@ -104,7 +122,7 @@ nvidia-smi
 
 ### 3.4 看懂 ETA
 
-日志 `eta: 7:52:34` 是剩余时间估计（按当前迭代速度外推）。注意渐进式训练后期 patch 变大（256）batch 变小（1），每迭代会变慢，实际总时长可能比早期 ETA 更长。
+日志 `eta: 7:52:34` 是剩余时间估计（按当前迭代速度外推）。注意渐进式训练后期 patch 变大、batch 变小，每迭代会变慢，实际总时长可能比早期 ETA 更长。（以上面联影图像域为例，后期 patch 为 256、batch 为 1；各数据集/域的 `gt_sizes` 与 `mini_batch_sizes` 取值不同，西门子见 [6-XIMENZI_ADAPTATION.md](6-XIMENZI_ADAPTATION.md)。）
 
 ---
 
@@ -113,7 +131,8 @@ nvidia-smi
 - 频率：`save_checkpoint_freq: 5000`（yml 已设）→ 90k 迭代共 18 个快照，约 5.4GB。
 - **系统盘只有 30G**（仓库 + experiments 都在系统盘），建议隔一段时间检查：
   ```bash
-  du -sh experiments/CT_ImageDomain_Restormer
+  du -sh experiments/CT_ImageDomain_Restormer              # 联影·图像域
+  du -sh experiments/CT_ProjectionDomain_Ximenzi_Restormer # 西门子·投影域（同理）
   df -h /        # 看系统盘剩余
   ```
 - 训练完，需要腾空间就按第 2 节的"成对删"清掉中间快照，只留 `net_g_latest.pth` 和最后几个。
@@ -125,14 +144,27 @@ nvidia-smi
 用最新权重推理验证集（文档 `docs/2-EXECUTION.md` 第 7 节）：
 
 ```bash
+# 联影·图像域
 python test_ct.py --weights experiments/CT_ImageDomain_Restormer/models/net_g_latest.pth \
     --data_root /root/autodl-tmp/联影双能相位数据2080 \
     --patient 72278_406010_960+_AXIAL_CE1_F071Y_20211216_Thick1_Incre1 \
               91963_301643_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1 \
               91963_53624_960+_AXIAL_CE1_M070Y_20211216_Thick1_Incre1
+
+# 联影·投影域
+python test_ct_proj.py \
+    --weights experiments/CT_ProjectionDomain_Restormer/models/net_g_latest.pth \
+    --data_root /root/autodl-tmp/联影双能相位数据2080 \
+    --patient 72278_406010_960+_AXIAL_CE1_F071Y_20211216_Thick1_Incre1
+
+# 西门子·投影域（--txt 模式：路径来自索引文件，不需要 --data_root）
+python test_ct_proj.py \
+    --weights experiments/CT_ProjectionDomain_Ximenzi_Restormer/models/net_g_latest.pth \
+    --config Options/CT_ProjectionDomain_Ximenzi_Restormer.yml \
+    --txt ./test_ximenzi_proj.txt
 ```
 
-输出到 `results/ct/`：`<病人>_pred/input/gt.raw`（input/gt 已剔首尾切片、与 pred 同形状）+ 终端 MSE/RMSE/MAE/PSNR/SSIM（HU 值域）。投影域推理用 `test_ct_proj.py`，产出同理（`proj_crop_rows` 裁黑边、三卷同形状）。
+输出到 `results/ct/`：`<病人>_pred/input/gt.raw`（input/gt 已剔首尾切片、与 pred 同形状）+ 终端 MSE/RMSE/MAE/PSNR/SSIM（HU 值域）。投影域推理用 `test_ct_proj.py`，产出同理（按 yml 的 `proj_crop_rows`/`proj_crop_cols` 裁黑边、三卷同形状；联影形状 `(720,96,512)`，西门子 `(1000,256,496)`）。
 
 ---
 
@@ -154,11 +186,13 @@ python test_ct.py --weights experiments/CT_ImageDomain_Restormer/models/net_g_la
 | 内容 | 位置 | 保存镜像后？ |
 |------|------|-------------|
 | conda 环境 | 数据盘 `/root/autodl-tmp/envs/` | ❌ 不保存，需重建 |
-| 数据 | 数据盘 `/root/autodl-tmp/联影双能相位数据2080` | ❌ 不保存 |
+| 数据（联影） | 数据盘 `/root/autodl-tmp/联影双能相位数据2080` | ❌ 不保存 |
+| 数据（西门子 PBI） | 数据盘 `/mnt/tm/ximenzi_pbi_data` | ❌ 不保存 |
+| 索引 txt（两套数据集） | 仓库根目录（`train_*.txt` / `valid_*.txt` / `test_ximenzi_proj.txt` 等，被 `.gitignore` 忽略） | ⚠️ 在系统盘仓库里会随镜像保存，但**不在 git 里**；换实例后若丢失需重跑对应 prepare 脚本 |
 | 仓库+训练产物 | 系统盘 `/root/imageReconstruction/restormer` | ✅ 随镜像保存 |
 
 - 换新实例后，`conda env list` 确认环境还在（数据盘跟着新实例走的话），SSH 的 host/port 会变，TensorBoard 隧道和 SFTP 配置要更新。
-- 如果保存镜像后重开导致数据盘为空，需要重新上传数据、重装环境，但**系统盘上的仓库和已训练权重还在**。
+- 如果保存镜像后重开导致数据盘为空，需要重新上传数据（两套数据集路径见上表）、重装环境，但**系统盘上的仓库和已训练权重还在**；索引 txt 若丢失，重跑 `prepare_ct_proj_data.py` / `prepare_ximenzi_proj_data.py` 即可再生成。
 
 ---
 
@@ -166,19 +200,24 @@ python test_ct.py --weights experiments/CT_ImageDomain_Restormer/models/net_g_la
 
 ```bash
 # 看训练是否在跑 / 进度
-tail -f train_ct.log
+tail -f train_ct.log          # 联影；西门子后台跑时对应 train_ct_proj_ximenzi.log（见 2-EXECUTION.md 第 4 节）
 nvidia-smi
 
 # 启动 TensorBoard（然后本地开自定义服务端口 6006 或 SSH 隧道）
 tensorboard --logdir tb_logger --port 6006 --host 0.0.0.0
 
-# 中断后续训
-python basicsr/train.py -opt Options/CT_ImageDomain_Restormer.yml --launcher none
+# 中断后续训（两套数据集各自独立）
+python basicsr/train.py -opt Options/CT_ImageDomain_Restormer.yml --launcher none              # 联影·图像域
+python basicsr/train.py -opt Options/CT_ProjectionDomain_Restormer.yml --launcher none         # 联影·投影域
+python basicsr/train.py -opt Options/CT_ProjectionDomain_Ximenzi_Restormer.yml --launcher none # 西门子·投影域
 
 # 推理验证集
-python test_ct.py --weights experiments/CT_ImageDomain_Restormer/models/net_g_latest.pth --patient ...
+python test_ct.py --weights experiments/CT_ImageDomain_Restormer/models/net_g_latest.pth --patient ...   # 联影·图像域
+python test_ct_proj.py --weights experiments/CT_ProjectionDomain_Ximenzi_Restormer/models/net_g_latest.pth \
+    --config Options/CT_ProjectionDomain_Ximenzi_Restormer.yml --txt ./test_ximenzi_proj.txt             # 西门子·投影域
 
 # 看磁盘余量 / 产物大小
 df -h /
 du -sh experiments/CT_ImageDomain_Restormer
+du -sh experiments/CT_ProjectionDomain_Ximenzi_Restormer
 ```

@@ -1,0 +1,145 @@
+# 西门子 PBI 投影域训练配置（domain: proj，按视角取探测器平面）
+# 数据: /mnt/tm/ximenzi_pbi_data/<01..30>/ 下的
+#       proj_pbi_fs_dec_blur_phase.raw (输入) / proj_no_pbi.raw (目标)
+# 形状: (1000, 500, 500) = (视角数, H, W)，float32 小端
+# 与联影配置 Options/CT_ProjectionDomain_Restormer.yml 的差异见 docs/6-XIMENZI_ADAPTATION.md
+name: CT_ProjectionDomain_Ximenzi_Restormer
+model_type: ImageCleanModel
+scale: 1
+num_gpu: 1            # 改成你的 GPU 数；0 表示纯 CPU（极慢，仅调试）
+manual_seed: 100
+
+# dataset and data loader settings
+datasets:
+  train:
+    name: TrainSet
+    type: Dataset_CT
+    domain: proj                  # ← 域开关：'image' | 'proj'
+    txt: ./train_ximenzi_proj.txt
+
+    # ---- 数据几何（换数据集只改这几行）----
+    proj_shape: [1000, 500, 500]  # (视角数, H, W)
+    proj_crop_rows: 122           # 上下各裁 122 → 500-244 = 256 行（16 整除）
+    proj_crop_cols: 2             # 左右各裁 2 → 500-4 = 496 列（16 整除）
+    # 说明：GT 在行[118,381]外恒为 0（实测边界外能量 0.000000%），裁 122 损失 1.74%；
+    #       列方向各视角的投影足迹宽度不同（旋转展开），全 1000 视角并集为列[0,499]，
+    #       故不能按内容边界裁；只裁 2 列是为了把宽度凑成 16 整除（代价仅 0.018%），
+    #       边缘列能量只有中间列的约 1%。最终平面 256x496。
+
+    # ---- 归一化尺度：必填，留空会直接报错 ----
+    # [!] 必须按当前数据集实测标定，不能沿用联影的 0.28（那会让动态范围只剩 1/3）。
+    #     先跑：python analyze_proj_range.py --data-root /mnt/tm/ximenzi_pbi_data
+    #     把输出的『建议 proj_norm_clip_max』填到下面这行，再把 ~ 去掉。
+    proj_norm_clip_max: 0.12
+
+    geometric_augs: false         # 投影域禁 90° 旋转（交换视角轴/通道轴，物理无意义）
+
+    use_shuffle: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 4         # 须 = max(mini_batch_sizes)=4（渐进式阶段从这里子采样）
+
+    ### 渐进式训练：裁剪后平面 256x500，gt_size 上限 256
+    ### （取 192 而非 256，保留纵向随机裁剪的余地）
+    mini_batch_sizes: [4, 3, 2, 1]
+    iters: [30000, 24000, 18000, 18000]
+    gt_size: 192
+    gt_sizes: [96, 128, 160, 192]
+    ### -------------------------------------------------------
+
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: ValSet
+    type: Dataset_CT
+    domain: proj
+    txt: ./valid_ximenzi_proj.txt
+    proj_shape: [1000, 500, 500]  # 必须与 train 一致
+    proj_crop_rows: 122
+    proj_crop_cols: 2
+    proj_norm_clip_max: 0.12      # 必须与 train 一致
+    # 验证集抽样：验证只有 3000 个样本、但每个是完整 256x496 平面，
+    # 不抽样的话单次验证约 12 min，90 次会占掉 18 h。
+    # 0.1 = 每 10 个取 1（3000 → 300 样本）。固定步长而非随机，保证各次 val PSNR 可比。
+    val_sample_ratio: 0.2
+    io_backend:
+      type: disk
+
+# network structures
+network_g:
+  type: Restormer
+  inp_channels: 1     # 单通道视角平面；双能可设 2
+  out_channels: 1     # 残差结构，必须与 inp_channels 相同
+  dim: 48
+  num_blocks: [4, 6, 6, 8]
+  num_refinement_blocks: 4
+  heads: [1, 2, 4, 8]
+  ffn_expansion_factor: 2.66
+  bias: False
+  LayerNorm_type: WithBias
+  dual_pixel_task: False
+
+# path
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+# training settings
+train:
+  total_iter: 90000        # 15000 训练样本 / batch 4 = 3750 iter/epoch → 约 24 epoch
+  warmup_iter: -1
+  use_grad_clip: true
+
+  # 前 3 万轮固定 3e-4，之后余弦退火到 1e-6
+  scheduler:
+    type: CosineAnnealingRestartCyclicLR
+    periods: [30000, 60000]
+    restart_weights: [1, 1]
+    eta_mins: [0.0003, 0.000001]
+
+  mixing_augs:
+    mixup: false       # 投影域样本多（15000），联影投影域配置也未开 mixup
+    mixup_beta: 1.2
+    use_identity: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 3e-4
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.999]
+
+  # losses：post-log 噪声近似高斯，L1 是合理起点
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1
+    reduction: mean
+
+# validation settings
+val:
+  window_size: 8
+  val_freq: !!float 5000    # 90 次验证 -> 18 次（配合 val_sample_ratio 才够便宜）
+  save_img: false
+  rgb2bgr: true
+  use_image: false        # 直接在张量上算 PSNR（归一化域），避免 uint8 量化
+  max_minibatch: 8
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+
+# logging settings
+logger:
+  print_freq: 200
+  save_checkpoint_freq: !!float 5000
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+
+# dist training settings
+dist_params:
+  backend: nccl
+  port: 29500
