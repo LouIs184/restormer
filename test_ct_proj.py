@@ -17,6 +17,7 @@
 import argparse
 import os
 import sys
+import time
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -47,6 +48,15 @@ parser.add_argument('--crop_cols', type=int, default=None,
                     help='覆盖 yml 里的 proj_crop_cols（默认读 yml）')
 parser.add_argument('--proj_clip_max', type=float, default=None,
                     help='覆盖 yml 里的 proj_norm_clip_max（默认读 yml，保持与训练一致）')
+parser.add_argument('--proj_shape', default=None,
+                    help='覆盖 yml 里的 proj_shape，格式 n_view,H,W（如 720,500,500）。'
+                         '测试数据的视角数与训练不同时必须指定，否则会按训练的视角数解析')
+parser.add_argument('--batch_size', type=int, default=4,
+                    help='推理批大小。各视角形状相同，可批处理加速；'
+                         'Restormer 只有 LayerNorm、无 BatchNorm，批处理与逐张结果等价。'
+                         '显存不够时降到 1。默认 4')
+parser.add_argument('--progress', type=int, default=100,
+                    help='每处理多少个视角打印一次进度（0=不打印）。默认 100')
 args = parser.parse_args()
 
 # ---- 网络结构 + 投影域参数从训练 yml 读取 ----
@@ -55,7 +65,9 @@ net_cfg = dict(cfg['network_g'])
 net_cfg.pop('type')
 data_cfg = cfg['datasets'].get('val', cfg['datasets'].get('train', {}))
 
-n_view, H0, W0 = (int(x) for x in data_cfg.get('proj_shape', (720, 128, 512)))
+shape_cfg = args.proj_shape.split(',') if args.proj_shape \
+    else data_cfg.get('proj_shape', (720, 128, 512))
+n_view, H0, W0 = (int(x) for x in shape_cfg)
 crop_rows = args.crop_rows if args.crop_rows is not None else int(
     data_cfg.get('proj_crop_rows', 0))
 crop_cols = args.crop_cols if args.crop_cols is not None else int(
@@ -83,7 +95,7 @@ if pad_h or pad_w:
 
 # ---- 组装待推理清单: [(标签, 输入路径, 目标路径)] ----
 if args.txt:
-    jobs, seen = [], set()
+    pairs, seen = [], set()
     with open(args.txt, encoding='utf-8') as f:
         for line in f:
             parts = line.split()
@@ -92,8 +104,24 @@ if args.txt:
             if (parts[0], parts[1]) in seen:
                 continue
             seen.add((parts[0], parts[1]))
-            # 用输入文件所在目录名作标签（新数据集是 01/02...，联影是长病人名）
-            jobs.append((os.path.basename(os.path.dirname(parts[0])), parts[0], parts[1]))
+            pairs.append((parts[0], parts[1]))
+
+    # 标签 = 输入文件所在目录相对于「所有输入目录的公共祖先」的路径：
+    #   单层目录（ximenzi 的 01/）        -> "01"
+    #   两层目录（仿真数据的 01/dose_1e4/）-> "01_dose_1e4"
+    # 只取 basename(dirname(...)) 在两层级数据上会重名（都叫 dose_1e4），
+    # 不同头的输出会互相覆盖。
+    dirs = [os.path.dirname(p[0]) for p in pairs]
+    try:
+        prefix = os.path.commonpath(dirs) if dirs else ''
+    except ValueError:          # 跨盘符等极端情况
+        prefix = ''
+    jobs = []
+    for inp_path, gt_path in pairs:
+        rel = os.path.relpath(os.path.dirname(inp_path), prefix) if prefix else ''
+        label = rel.replace(os.sep, '_') if rel not in ('', '.') \
+            else os.path.basename(os.path.dirname(inp_path))
+        jobs.append((label, inp_path, gt_path))
 elif args.patient:
     jobs = [(p,
              os.path.join(args.data_root, p, args.inp_name),
@@ -152,15 +180,25 @@ for label, inp_path, gt_path in jobs:
         input_cropped, gt_cropped = inp, gt
 
     pred = np.zeros((n_view, H, W), dtype=np.float32)
+    bs = max(1, int(args.batch_size))
+    t0 = time.time()
+    print(f'  {label}: {n_view} 视角, batch={bs}', flush=True)
     with torch.no_grad():
-        for v in range(n_view):              # 逐视角推理
-            x = torch.from_numpy(norm(input_cropped[v])).unsqueeze(0).unsqueeze(0)
+        for start in range(0, n_view, bs):
+            end = min(start + bs, n_view)
+            batch = np.stack([norm(input_cropped[v]) for v in range(start, end)])
+            x = torch.from_numpy(batch).unsqueeze(1)     # (B,1,H,W)
             if pad_h or pad_w:               # 与验证集 pad_test 一致：补齐到 8 的倍数
                 x = F.pad(x, (0, pad_w, 0, pad_h), 'reflect')
-            y = model(x.cuda())[0, 0]
+            y = model(x.cuda())                          # (B,1,H',W')
             if pad_h or pad_w:
-                y = y[:H, :W]                # 输出裁回原尺寸
-            pred[v] = denorm(y.cpu().numpy())
+                y = y[:, :, :H, :W]                      # 输出裁回原尺寸
+            pred[start:end] = denorm(y[:, 0].cpu().numpy())
+            if args.progress > 0 and (end % args.progress == 0 or end == n_view):
+                el = time.time() - t0
+                eta = el / end * (n_view - end)
+                print(f'    {end}/{n_view} 视角  已用 {el:.0f}s  剩余约 {eta:.0f}s',
+                      flush=True)
 
     os.makedirs(args.result_dir, exist_ok=True)
     base = os.path.join(args.result_dir, label)

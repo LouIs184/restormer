@@ -9,3 +9,4 @@
 | [5-PROJECTION_DOMAIN.md](5-PROJECTION_DOMAIN.md) | 投影域（post-log sinogram）训练适配方案：方案 B（按视角）+ `domain` 域切换 + 代码/配置细节 |
 | [6-XIMENZI_ADAPTATION.md](6-XIMENZI_ADAPTATION.md) | 适配西门子 PBI 投影数据（`ximenzi_pbi_data`）：形状参数化改动、裁剪量实测依据、`clip_max` 标定流程 |
 | [7-TROUBLESHOOTING.md](7-TROUBLESHOOTING.md) | 排错手册：通用分层排查法 + 实战案例（`No module named 'basicsr'`、cuDNN 冲突导致 illegal memory access、`gt_size` 越界等）+ 快速对照表 |
+| [8-SIMULATION_DATA_ADAPTATION.md](8-SIMULATION_DATA_ADAPTATION.md) | 适配仿真数据（`simulation_change_params_20heads`，titan 服务器）：实测格式、必须重标的 `clip_max`/`crop_rows`、新增 prepare 脚本与 yml 的具体字段 |

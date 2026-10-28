@@ -1,0 +1,144 @@
+# 仿真数据投影域训练配置（domain: proj，按视角取探测器平面）
+# 数据: /mnt/no3/tengmeng/simulation_change_params_20heads/<头>/<剂量>/ 下的
+#       proj_pbi_fs_dec_blur_phase.raw (输入) / proj_no_pbi.raw (目标)
+# 形状: (100, 500, 500) = (视角数, H, W)，float32 小端，post_log
+# 说明见 docs/8-SIMULATION_DATA_ADAPTATION.md
+name: CT_ProjectionDomain_Sim_Restormer
+model_type: ImageCleanModel
+scale: 1
+num_gpu: 1            # 单卡训练；TITAN Xp 12GB
+manual_seed: 100
+
+# dataset and data loader settings
+datasets:
+  train:
+    name: TrainSet
+    type: Dataset_CT
+    domain: proj                  # ← 域开关：'image' | 'proj'
+    txt: ./train_sim_proj.txt     # 头 01~16 × 5 剂量 × 100 视角 = 8000
+
+    # ---- 数据几何（换数据集只改这几行）----
+    proj_shape: [100, 500, 500]   # (视角数, H, W)
+    proj_crop_rows: 122           # 上下各裁 122 → 256 行（16 整除）
+    proj_crop_cols: 2             # 左右各裁 2 → 496 列（16 整除）
+    # 说明：
+    #   行：仿真数据与联影/西门子一样，上下边界的相位处理受 FFT 影响、信号不可靠，
+    #       故有意裁掉（不是按内容边界裁）。实测内容包围盒并集为行[91,408]，
+    #       裁 122 对最宽的头（08/04）会损失 15%/12% 的目标能量——这是刻意的取舍。
+    #   列：各视角足迹宽度不同（并集列[0,499]），不能按内容边界裁；只裁 2 列凑 16 整除。
+    #   最终平面 256x496。
+
+    # ---- 归一化上界 ----
+    # 实测（18 个可用头、全部 5 个剂量、裁剪后区域）：GT max=0.162280，Input max=0.161797。
+    # 取 0.17：覆盖全部像素 + 约 4.8% 余量，动态范围利用率 95.5%。
+    # [!] 不要沿用西门子的 0.12——那会截断头 01/03/08 的 3~4% 亮区像素。
+    proj_norm_clip_max: 0.17
+
+    geometric_augs: false         # 投影域禁 90° 旋转（交换视角轴/通道轴，物理无意义）
+
+    use_shuffle: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 4         # 须 = max(mini_batch_sizes)=4
+
+    ### 渐进式训练：裁剪后平面 256x496，gt_size 上限 256
+    mini_batch_sizes: [4, 3, 2, 1]
+    iters: [30000, 24000, 18000, 18000]
+    gt_size: 192
+    gt_sizes: [96, 128, 160, 192]
+    ### -------------------------------------------------------
+
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: ValSet
+    type: Dataset_CT
+    domain: proj
+    txt: ./valid_sim_proj.txt     # 头 17~18 × 5 剂量 × 100 视角 = 1000
+    proj_shape: [100, 500, 500]   # 必须与 train 一致
+    proj_crop_rows: 122
+    proj_crop_cols: 2
+    proj_norm_clip_max: 0.17      # 必须与 train 一致
+    # 验证集 1000 个全尺寸样本；抽 0.2 → 200 个/次
+    val_sample_ratio: 0.2
+    io_backend:
+      type: disk
+
+# network structures
+network_g:
+  type: Restormer
+  inp_channels: 1     # 单通道视角平面；双能可设 2
+  out_channels: 1     # 残差结构，必须与 inp_channels 相同
+  dim: 48
+  num_blocks: [4, 6, 6, 8]
+  num_refinement_blocks: 4
+  heads: [1, 2, 4, 8]
+  ffn_expansion_factor: 2.66
+  bias: False
+  LayerNorm_type: WithBias
+  dual_pixel_task: False
+
+# path
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+# training settings
+train:
+  total_iter: 90000        # 8000 训练样本 / batch 4 = 2000 iter/epoch → 约 45 epoch
+  warmup_iter: -1
+  use_grad_clip: true
+
+  # 前 3 万轮固定 3e-4，之后余弦退火到 1e-6
+  scheduler:
+    type: CosineAnnealingRestartCyclicLR
+    periods: [30000, 60000]
+    restart_weights: [1, 1]
+    eta_mins: [0.0003, 0.000001]
+
+  mixing_augs:
+    mixup: false       # 5 个剂量档提供了一定多样性；样本 8000，先不开
+    mixup_beta: 1.2
+    use_identity: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 3e-4
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.999]
+
+  # losses：post-log 噪声近似高斯，L1 是合理起点
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1
+    reduction: mean
+
+# validation settings
+val:
+  window_size: 8
+  val_freq: !!float 5000
+  save_img: false
+  rgb2bgr: true
+  use_image: false        # 直接在张量上算 PSNR（归一化域），避免 uint8 量化
+  max_minibatch: 8
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+
+# logging settings
+logger:
+  print_freq: 200
+  save_checkpoint_freq: !!float 5000
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+
+# dist training settings
+dist_params:
+  backend: nccl
+  port: 29500
